@@ -119,6 +119,13 @@ aionui-app（顶层，依赖所有 crate）
 - `aionui-app` 是唯一的组装者，负责依赖注入
 - `aionui-common` 零业务逻辑
 
+## 备注事项
+
+以下事项在梳理阶段不展开设计，但需在实现阶段考虑：
+
+- **数据目录可配置**：Rust 后端的数据目录（SQLite、配置、上传文件等）需支持通过配置文件或环境变量指定，不硬编码路径
+- **Electron 数据迁移**：当 Rust 后端作为 Electron 本地服务打包时，需在首次启动时检测旧 Electron 数据目录（如 `~/Library/Application Support/AionUi/`），自动迁移数据到新目录
+
 ## 跨会话支持
 
 `00-module-index.md` 的状态列追踪进度。新会话操作：

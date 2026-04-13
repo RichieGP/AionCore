@@ -3,6 +3,7 @@ mod auth;
 mod confirmation;
 mod connection_test;
 mod conversation;
+mod file;
 mod lifecycle;
 mod provider;
 mod remote_agent;
@@ -50,5 +51,15 @@ pub use system::{
 };
 pub use connection_test::{
     GeminiSubscriptionData, GeminiSubscriptionQuery, TestBedrockConnectionRequest,
+};
+pub use file::{
+    CancelZipRequest, CopyFilesRequest, CopyFilesResponse, CreateTempFileRequest,
+    DirOrFileResponse, FetchRemoteImageRequest, FileChangeInfoResponse, FileMetadataResponse,
+    FileWatchRequest, GetFileMetadataRequest, GetFilesByDirRequest, GetImageBase64Request,
+    ListWorkspaceFilesRequest, ReadFileBufferRequest, ReadFileRequest, RemoveEntryRequest,
+    RenameRequest, RenameResponse, SnapshotBaselineRequest, SnapshotCompareResponse,
+    SnapshotDiscardRequest, SnapshotInfoResponse, SnapshotMode, SnapshotStageRequest,
+    SnapshotWorkspaceRequest, WorkspaceFlatFileResponse, WorkspaceOfficeWatchRequest,
+    WriteFileRequest, ZipFileEntry, ZipRequest,
 };
 pub use websocket::WebSocketMessage;

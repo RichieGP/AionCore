@@ -1,0 +1,14 @@
+pub mod path_safety;
+pub mod traits;
+pub mod types;
+
+pub use path_safety::{has_traversal, validate_path, validate_path_for_write};
+pub use traits::{
+    FileServiceRef, FileWatchServiceRef, IFileService, IFileWatchService,
+    ISnapshotService, SnapshotServiceRef,
+};
+pub use types::{
+    CompareResult, ContentUpdateEvent, CopyResult, DirOrFile, FileChangeInfo,
+    FileMetadata, FileWatchEvent, OfficeFileAddedEvent, SnapshotInfo,
+    SnapshotMode, WorkspaceFlatFile, ZipEntry,
+};

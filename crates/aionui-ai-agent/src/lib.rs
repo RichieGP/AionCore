@@ -5,6 +5,7 @@ pub mod agent_manager;
 pub mod cli_process;
 pub mod remote_agent_routes;
 pub mod remote_agent_service;
+pub mod skill_manager;
 pub mod stream_event;
 pub mod task_manager;
 pub mod types;
@@ -15,6 +16,11 @@ pub use agent_manager::{AgentManagerHandle, IAgentManager};
 pub use cli_process::{CliAgentProcess, CliSpawnConfig};
 pub use remote_agent_routes::{RemoteAgentRouterState, remote_agent_routes};
 pub use remote_agent_service::RemoteAgentService;
+pub use skill_manager::{
+    AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text,
+    build_system_instructions, detect_skill_load_request, prepare_first_message,
+    prepare_first_message_with_skills_index,
+};
 pub use stream_event::AgentStreamEvent;
 pub use task_manager::{AgentFactory, IWorkerTaskManager, WorkerTaskManagerImpl};
 pub use types::{

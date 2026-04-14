@@ -54,6 +54,7 @@ pub struct HubExtensionListItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionSummaryResponse {
+    pub permissions: serde_json::Value,
     pub risk_level: String,
     pub details: Vec<PermissionDetailResponse>,
 }
@@ -220,6 +221,7 @@ mod tests {
     #[test]
     fn test_permission_summary_response_serde() {
         let resp = PermissionSummaryResponse {
+            permissions: json!({"storage": true, "events": true}),
             risk_level: "moderate".into(),
             details: vec![PermissionDetailResponse {
                 permission: "network".into(),
@@ -228,6 +230,7 @@ mod tests {
             }],
         };
         let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["permissions"]["storage"], true);
         assert_eq!(json["riskLevel"], "moderate");
         assert_eq!(json["details"][0]["permission"], "network");
         assert_eq!(json["details"][0]["level"], "limited");

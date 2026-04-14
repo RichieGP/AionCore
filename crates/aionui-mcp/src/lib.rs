@@ -7,7 +7,8 @@ pub mod types;
 
 pub use adapter::{DetectedServer, McpAgentAdapter};
 pub use adapters::{
-    ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, IFlowAdapter, QwenAdapter,
+    AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter,
+    IFlowAdapter, OpencodeAdapter, QwenAdapter,
 };
 pub use error::McpError;
 pub use routes::{McpRouterState, mcp_routes};

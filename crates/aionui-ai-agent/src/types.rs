@@ -72,6 +72,7 @@ pub struct AcpBuildExtra {
     /// Associated cron job ID.
     #[serde(default)]
     pub cron_job_id: Option<String>,
+    /// Whether the workspace was explicitly provided by the user (vs. auto-created).
     #[serde(default)]
     pub custom_workspace: bool,
 }
@@ -214,6 +215,7 @@ mod tests {
         let legacy = r#"{"backend":"claude"}"#;
         let parsed: AcpBuildExtra = serde_json::from_str(legacy).unwrap();
         assert!(parsed.exclude_builtin_skills.is_empty());
+        assert!(!parsed.custom_workspace);
     }
 
     #[test]

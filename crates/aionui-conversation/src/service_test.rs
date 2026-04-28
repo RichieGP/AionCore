@@ -318,6 +318,63 @@ async fn create_stores_model_as_json() {
     assert_eq!(model.model, "m1");
 }
 
+// ── custom_workspace tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn create_with_user_provided_workspace_sets_custom_workspace_true() {
+    let (svc, _, _, _) = make_service();
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "model": { "provider_id": "p1", "model": "m1" },
+        "extra": { "workspace": "/my/project" }
+    }))
+    .unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
+    assert_eq!(resp.extra["custom_workspace"], true);
+    assert_eq!(resp.extra["workspace"], "/my/project");
+}
+
+#[tokio::test]
+async fn create_without_workspace_sets_custom_workspace_false_and_auto_creates_dir() {
+    let (svc, _, _, _) = make_service();
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "model": { "provider_id": "p1", "model": "m1" },
+        "extra": {}
+    }))
+    .unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
+    assert_eq!(resp.extra["custom_workspace"], false);
+    assert!(resp.extra["workspace"].as_str().unwrap().contains("-temp-"));
+}
+
+#[tokio::test]
+async fn create_with_non_object_extra_normalizes_to_object() {
+    let (svc, _, _, _) = make_service();
+    // extra is a string instead of an object — should be normalized, not panic or silently drop
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "model": { "provider_id": "p1", "model": "m1" },
+        "extra": {}
+    }))
+    .unwrap();
+    // The API type enforces object, so we test the normalization path via a manual extra mutation
+    // by directly constructing a request with a non-object extra value
+    let mut raw: serde_json::Value = json!({
+        "type": "acp",
+        "model": { "provider_id": "p1", "model": "m1" },
+        "extra": null
+    });
+    // Patch the extra field to be non-object
+    raw["extra"] = serde_json::Value::Bool(false);
+    // Since CreateConversationRequest.extra is Value, this will deserialize fine
+    if let Ok(patched_req) = serde_json::from_value::<CreateConversationRequest>(raw) {
+        let resp = svc.create("user_1", patched_req).await.unwrap();
+        // custom_workspace must be written — it must not be silently dropped
+        assert!(resp.extra.get("custom_workspace").is_some());
+    }
+}
+
 // ── Get tests ──────────────────────────────────────────────────────
 
 #[tokio::test]

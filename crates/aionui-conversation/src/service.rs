@@ -87,6 +87,9 @@ impl ConversationService {
         let source = req.source.unwrap_or(ConversationSource::Aionui);
 
         let mut extra = req.extra;
+        if !extra.is_object() {
+            extra = serde_json::Value::Object(serde_json::Map::new());
+        }
         let user_provided_workspace = !extra
             .get("workspace")
             .and_then(|v| v.as_str())

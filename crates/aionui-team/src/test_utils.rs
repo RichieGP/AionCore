@@ -1,7 +1,45 @@
-use aionui_common::now_ms;
+use aionui_ai_agent::{AgentManagerHandle, BuildTaskOptions, IWorkerTaskManager};
+use aionui_common::{AgentKillReason, AppError, TimestampMs, now_ms};
 use aionui_db::models::{MailboxMessageRow, TeamRow, TeamTaskRow};
 use aionui_db::{DbError, ITeamRepository, UpdateTaskParams, UpdateTeamParams};
 use std::sync::Mutex;
+
+/// No-op task manager for unit tests — never returns an active task.
+pub struct NullWorkerTaskManager;
+
+impl IWorkerTaskManager for NullWorkerTaskManager {
+    fn get_task(&self, _conversation_id: &str) -> Option<AgentManagerHandle> {
+        None
+    }
+
+    fn get_or_build_task(
+        &self,
+        _conversation_id: &str,
+        _options: BuildTaskOptions,
+    ) -> Result<AgentManagerHandle, AppError> {
+        Err(AppError::Internal(
+            "NullWorkerTaskManager: no task available".into(),
+        ))
+    }
+
+    fn kill(
+        &self,
+        _conversation_id: &str,
+        _reason: Option<AgentKillReason>,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn clear(&self) {}
+
+    fn active_count(&self) -> usize {
+        0
+    }
+
+    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+        vec![]
+    }
+}
 
 #[derive(Default)]
 pub struct MockState {

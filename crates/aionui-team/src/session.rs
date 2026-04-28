@@ -1,29 +1,40 @@
 use std::sync::Arc;
 
+use aionui_ai_agent::IWorkerTaskManager;
+use aionui_api_types::SendMessageRequest;
+use aionui_common::generate_id;
+use aionui_conversation::ConversationService;
 use aionui_db::ITeamRepository;
 use aionui_realtime::EventBroadcaster;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::TeamError;
 use crate::mailbox::Mailbox;
 use crate::mcp::{TeamMcpServer, TeamMcpStdioConfig};
+use crate::prompts::build_wake_payload;
 use crate::scheduler::TeammateManager;
 use crate::task_board::TaskBoard;
 use crate::types::{MailboxMessageType, Team, TeamAgent, TeammateStatus};
 
 pub struct TeamSession {
     team: Team,
+    user_id: String,
     scheduler: Arc<TeammateManager>,
     mailbox: Arc<Mailbox>,
     task_board: Arc<TaskBoard>,
     mcp_server: TeamMcpServer,
+    conversation_service: ConversationService,
+    task_manager: Arc<dyn IWorkerTaskManager>,
 }
 
 impl TeamSession {
     pub async fn start(
         team: Team,
+        user_id: String,
         repo: Arc<dyn ITeamRepository>,
         broadcaster: Arc<dyn EventBroadcaster>,
+        conversation_service: ConversationService,
+        task_manager: Arc<dyn IWorkerTaskManager>,
     ) -> Result<Self, TeamError> {
         let mailbox = Arc::new(Mailbox::new(repo.clone()));
         let task_board = Arc::new(TaskBoard::new(repo));
@@ -47,10 +58,13 @@ impl TeamSession {
 
         Ok(Self {
             team,
+            user_id,
             scheduler,
             mailbox,
             task_board,
             mcp_server,
+            conversation_service,
+            task_manager,
         })
     }
 
@@ -88,11 +102,7 @@ impl TeamSession {
             )
             .await?;
 
-        self.scheduler
-            .set_status(&lead_slot_id, TeammateStatus::Working)
-            .await?;
-
-        Ok(())
+        self.wake_and_dispatch(&lead_slot_id).await
     }
 
     pub async fn send_message_to_agent(
@@ -113,9 +123,60 @@ impl TeamSession {
             )
             .await?;
 
-        self.scheduler
-            .set_status(slot_id, TeammateStatus::Working)
-            .await?;
+        self.wake_and_dispatch(slot_id).await
+    }
+
+    /// Wake an agent (Idle → Working) and dispatch the accumulated mailbox
+    /// as a prompt to the underlying conversation agent.
+    ///
+    /// Waking is synchronous (status transition happens inline); the actual
+    /// `conversation_service.send_message` call is spawned as a background
+    /// task so the HTTP handler returns immediately — same pattern as single-chat.
+    async fn wake_and_dispatch(&self, slot_id: &str) -> Result<(), TeamError> {
+        let payload = match self.scheduler.try_wake(slot_id).await? {
+            Some(p) => p,
+            None => {
+                // Agent already working — mailbox write is enough; it will
+                // pick up the new message on its next turn.
+                return Ok(());
+            }
+        };
+
+        let prompt = build_wake_payload(&payload.agent, &payload.tasks, &payload.unread_messages);
+        let conversation_id = payload.agent.conversation_id.clone();
+        let team_id = self.team.id.clone();
+        let slot_id = slot_id.to_owned();
+
+        let req = SendMessageRequest {
+            content: prompt,
+            msg_id: generate_id(),
+            files: vec![],
+            inject_skills: vec![],
+        };
+
+        let conv_service = self.conversation_service.clone();
+        let user_id = self.user_id.clone();
+        let task_manager = self.task_manager.clone();
+        let scheduler = self.scheduler.clone();
+
+        tokio::spawn(async move {
+            match conv_service
+                .send_message(&user_id, &conversation_id, req, &task_manager)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(
+                        team_id = %team_id,
+                        slot_id,
+                        error = %e,
+                        "wake_and_dispatch: failed to send message to agent, resetting to idle"
+                    );
+                    // Reset agent to Idle so it can be re-woken on the next message.
+                    let _ = scheduler.set_status(&slot_id, TeammateStatus::Idle).await;
+                }
+            }
+        });
 
         Ok(())
     }
@@ -149,9 +210,10 @@ impl TeamSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockTeamRepo;
+    use crate::test_utils::{MockTeamRepo, NullWorkerTaskManager};
     use crate::types::{Team, TeamAgent, TeammateRole};
     use aionui_api_types::WebSocketMessage;
+    use aionui_conversation::ConversationService;
     use std::sync::Arc;
 
     struct NullBroadcaster;
@@ -195,13 +257,59 @@ mod tests {
         }
     }
 
+    struct NullSkillResolver;
+
+    #[async_trait::async_trait]
+    impl aionui_conversation::skill_resolver::SkillResolver for NullSkillResolver {
+        async fn auto_inject_names(&self) -> Vec<String> {
+            vec![]
+        }
+        async fn resolve_skills(
+            &self,
+            _names: &[String],
+        ) -> Vec<aionui_conversation::skill_resolver::ResolvedAgentSkill> {
+            vec![]
+        }
+        async fn link_workspace_skills(
+            &self,
+            _workspace: &std::path::Path,
+            _rel_dirs: &[&str],
+            _skills: &[aionui_conversation::skill_resolver::ResolvedAgentSkill],
+        ) -> usize {
+            0
+        }
+    }
+
+    fn null_conversation_service() -> ConversationService {
+        use aionui_db::SqliteConversationRepository;
+        // wake_and_dispatch is fire-and-forget: the actual send will fail
+        // (no conversation rows), but send_message returns Ok before that.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("lazy connect");
+        let repo = Arc::new(SqliteConversationRepository::new(pool));
+        ConversationService::new(repo, Arc::new(NullBroadcaster), Arc::new(NullSkillResolver))
+    }
+
+    async fn make_session(repo: Arc<dyn ITeamRepository>, team: Team) -> TeamSession {
+        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
+        let task_manager: Arc<dyn IWorkerTaskManager> = Arc::new(NullWorkerTaskManager);
+        TeamSession::start(
+            team,
+            "test-user".into(),
+            repo,
+            broadcaster,
+            null_conversation_service(),
+            task_manager,
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn start_and_stop() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
-
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
+        let session = make_session(repo, make_team()).await;
         assert_eq!(session.team_id(), "t1");
         assert!(session.mcp_server.port() > 0);
         session.stop();
@@ -210,10 +318,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_stdio_config_for_agent() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
-
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
+        let session = make_session(repo, make_team()).await;
         let config = session.mcp_stdio_config("lead-1");
         assert_eq!(config.slot_id, "lead-1");
         assert_eq!(config.port, session.mcp_server.port());
@@ -224,12 +329,8 @@ mod tests {
     async fn send_message_writes_to_lead_mailbox() {
         let repo = Arc::new(MockTeamRepo::new());
         let repo_dyn: Arc<dyn ITeamRepository> = repo.clone();
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
+        let session = make_session(repo_dyn, make_team()).await;
 
-        let session = TeamSession::start(team, repo_dyn, broadcaster)
-            .await
-            .unwrap();
         session.send_message("Hello team").await.unwrap();
 
         let state = repo.state.lock().unwrap();
@@ -244,12 +345,8 @@ mod tests {
     async fn send_message_to_agent_writes_to_mailbox() {
         let repo = Arc::new(MockTeamRepo::new());
         let repo_dyn: Arc<dyn ITeamRepository> = repo.clone();
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
+        let session = make_session(repo_dyn, make_team()).await;
 
-        let session = TeamSession::start(team, repo_dyn, broadcaster)
-            .await
-            .unwrap();
         session
             .send_message_to_agent("worker-1", "Do this task")
             .await
@@ -265,10 +362,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_to_unknown_agent_returns_error() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
-
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
+        let session = make_session(repo, make_team()).await;
         let result = session.send_message_to_agent("nonexistent", "Hello").await;
         assert!(result.is_err());
         session.stop();
@@ -277,10 +371,7 @@ mod tests {
     #[tokio::test]
     async fn add_and_remove_agent() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
-
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
+        let session = make_session(repo, make_team()).await;
 
         let new_agent = TeamAgent {
             slot_id: "new-1".into(),
@@ -309,10 +400,8 @@ mod tests {
     #[tokio::test]
     async fn rename_agent_in_session() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
+        let session = make_session(repo, make_team()).await;
 
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
         session
             .rename_agent("worker-1", "Senior Worker")
             .await
@@ -327,10 +416,7 @@ mod tests {
     #[tokio::test]
     async fn rename_unknown_agent_returns_error() {
         let repo: Arc<dyn ITeamRepository> = Arc::new(MockTeamRepo::new());
-        let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
-        let team = make_team();
-
-        let session = TeamSession::start(team, repo, broadcaster).await.unwrap();
+        let session = make_session(repo, make_team()).await;
         let result = session.rename_agent("nonexistent", "X").await;
         assert!(result.is_err());
         session.stop();

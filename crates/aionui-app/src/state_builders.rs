@@ -313,6 +313,7 @@ pub fn build_team_state(services: &AppServices) -> TeamRouterState {
         team_repo,
         conv_service,
         services.event_bus.clone(),
+        services.worker_task_manager.clone(),
     ));
     TeamRouterState { service }
 }

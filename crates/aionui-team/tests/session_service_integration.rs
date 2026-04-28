@@ -274,19 +274,63 @@ impl aionui_conversation::skill_resolver::SkillResolver for StubSkillResolver {
     async fn auto_inject_names(&self) -> Vec<String> {
         Vec::new()
     }
+    async fn resolve_skills(
+        &self,
+        _names: &[String],
+    ) -> Vec<aionui_conversation::skill_resolver::ResolvedAgentSkill> {
+        Vec::new()
+    }
+    async fn link_workspace_skills(
+        &self,
+        _workspace: &std::path::Path,
+        _rel_dirs: &[&str],
+        _skills: &[aionui_conversation::skill_resolver::ResolvedAgentSkill],
+    ) -> usize {
+        0
+    }
+}
+
+struct NullWorkerTaskManager;
+impl aionui_ai_agent::IWorkerTaskManager for NullWorkerTaskManager {
+    fn get_task(&self, _: &str) -> Option<aionui_ai_agent::AgentManagerHandle> {
+        None
+    }
+    fn get_or_build_task(
+        &self,
+        _: &str,
+        _: aionui_ai_agent::BuildTaskOptions,
+    ) -> Result<aionui_ai_agent::AgentManagerHandle, aionui_common::AppError> {
+        Err(aionui_common::AppError::Internal("stub".into()))
+    }
+    fn kill(
+        &self,
+        _: &str,
+        _: Option<aionui_common::AgentKillReason>,
+    ) -> Result<(), aionui_common::AppError> {
+        Ok(())
+    }
+    fn clear(&self) {}
+    fn active_count(&self) -> usize {
+        0
+    }
+    fn collect_idle(&self, _: aionui_common::TimestampMs) -> Vec<String> {
+        vec![]
+    }
 }
 
 fn setup() -> TeamSessionService {
     let team_repo: Arc<dyn ITeamRepository> = Arc::new(FullMockTeamRepo::new());
     let conv_repo: Arc<dyn IConversationRepository> = Arc::new(MockConversationRepo::new());
     let broadcaster: Arc<dyn EventBroadcaster> = Arc::new(NullBroadcaster);
+    let task_manager: Arc<dyn aionui_ai_agent::IWorkerTaskManager> =
+        Arc::new(NullWorkerTaskManager);
     let conv_service = ConversationService::new_with_workspace_root(
         conv_repo,
         broadcaster.clone(),
         std::env::temp_dir(),
         Arc::new(StubSkillResolver),
     );
-    TeamSessionService::new(team_repo, conv_service, broadcaster)
+    TeamSessionService::new(team_repo, conv_service, broadcaster, task_manager)
 }
 
 fn two_agent_input() -> Vec<TeamAgentInput> {

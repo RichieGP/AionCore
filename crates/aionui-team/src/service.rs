@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aionui_ai_agent::IWorkerTaskManager;
 use aionui_api_types::{
     AddAgentRequest, CreateConversationRequest, CreateTeamRequest, TeamAgentResponse, TeamResponse,
 };
@@ -19,6 +20,7 @@ pub struct TeamSessionService {
     repo: Arc<dyn ITeamRepository>,
     conversation_service: ConversationService,
     broadcaster: Arc<dyn EventBroadcaster>,
+    task_manager: Arc<dyn IWorkerTaskManager>,
     sessions: DashMap<String, TeamSession>,
 }
 
@@ -27,11 +29,13 @@ impl TeamSessionService {
         repo: Arc<dyn ITeamRepository>,
         conversation_service: ConversationService,
         broadcaster: Arc<dyn EventBroadcaster>,
+        task_manager: Arc<dyn IWorkerTaskManager>,
     ) -> Self {
         Self {
             repo,
             conversation_service,
             broadcaster,
+            task_manager,
             sessions: DashMap::new(),
         }
     }
@@ -362,8 +366,17 @@ impl TeamSessionService {
             .await?
             .ok_or_else(|| TeamError::TeamNotFound(team_id.into()))?;
         let team = Team::from_row(&row)?;
+        let user_id = row.user_id.clone();
 
-        let session = TeamSession::start(team, self.repo.clone(), self.broadcaster.clone()).await?;
+        let session = TeamSession::start(
+            team,
+            user_id,
+            self.repo.clone(),
+            self.broadcaster.clone(),
+            self.conversation_service.clone(),
+            self.task_manager.clone(),
+        )
+        .await?;
 
         self.sessions.insert(team_id.to_owned(), session);
         Ok(())

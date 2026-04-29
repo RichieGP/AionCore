@@ -989,17 +989,54 @@ Wave 5（3 人关键路径 + 可并行点）
 
 ---
 
-### W5-D29a — `SpawnAgentRequest` 类型 + `spawn_agent` 校验层
+### W5-D29a-1 — `SpawnAgentRequest` 类型 + `spawn_agent` 方法骨架
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/session.rs`（新 struct `SpawnAgentRequest` + `TeamSession::spawn_agent` 方法的校验前半段） |
-| 职责 | 只做 spawn 前置校验：<br>a. caller role == Lead 校验<br>b. name 调 W3-D14a 归一化 + unique 冲突校验（复用 W3-D14b 的 renamed_agents 逻辑里的冲突检查助手）<br>c. `agent_type` 在 `SPAWN_BACKEND_WHITELIST` |
-| 依赖 | W3-D14a / W3-D14b |
-| 测试 | 3 条：caller 非 Lead 返 Err；name 冲突返 Err；非白名单返 Err |
-| 预估 LoC | 80 · 预估人天 0.7 |
-| 接口契约 | [§30.1](./interface-contracts.md#301-spawnagentrequest--校验层) |
-| 事实来源 | [aionui-audit §2.1 MCP spawn](./aionui-audit.md#21-能力清单) |
+| 目标文件 | `crates/aionui-team/src/session.rs`（新 struct `SpawnAgentRequest` + `TeamSession::spawn_agent` 空壳 fn 签名，body `todo!()`） |
+| 职责 | 只做类型声明 + 方法签名：`SpawnAgentRequest { name, agent_type, custom_agent_id, model }` + `pub async fn spawn_agent(caller_slot_id, req) -> Result<TeamAgent, TeamError>` |
+| 依赖 | 无 |
+| 测试 | 1 条：类型可构造 + 方法签名可编译（trait 对象 Send） |
+| 预估 LoC | 30 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.1.1](./interface-contracts.md#301-spawnagentrequest--校验层) |
+
+### W5-D29a-2 — `spawn_agent` 校验：caller role == Lead
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第一段校验） |
+| 职责 | 只做一件事：按 `caller_slot_id` 取 agent；若 `agent.role != Lead` → `Err(TeamError::LeaderOnly)` |
+| 依赖 | W5-D29a-1（方法骨架） |
+| 测试 | 2 条：caller Lead 通过；非 Lead 返 Err |
+| 预估 LoC | 20 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.1.2](./interface-contracts.md#301-spawnagentrequest--校验层) |
+
+### W5-D29a-3 — `spawn_agent` 校验：name 归一化 + 唯一性
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第二段校验） |
+| 职责 | 只做一件事：调 W3-D14a `normalize_name`；对比现有 agents 规范化名；冲突 → `Err(TeamError::NameConflict)` |
+| 依赖 | W5-D29a-2 + W3-D14a（normalize_name） |
+| 测试 | 2 条：新 name 通过；已有规范化同名返 Err |
+| 预估 LoC | 25 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.1.3](./interface-contracts.md#301-spawnagentrequest--校验层) |
+
+### W5-D29a-4 — `spawn_agent` 校验：backend 在白名单
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 第三段校验） |
+| 职责 | 只做一件事：`req.agent_type` 缺省继承 caller.backend；校验在 `SPAWN_BACKEND_WHITELIST`（`["claude", "codex"]`）；非白名单 → `Err(TeamError::BackendNotAllowed)` |
+| 依赖 | W5-D29a-3 |
+| 测试 | 2 条：白名单通过；非白名单返 Err |
+| 预估 LoC | 25 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.1.4](./interface-contracts.md#301-spawnagentrequest--校验层) |
+| 事实来源 | [aionui-audit §2.1 MCP spawn](./aionui-audit.md#21-能力清单) · backend-audit §1.5.2 SPAWN_BACKEND_WHITELIST |
 
 ### W5-D29b — `TeamSessionService::add_agent` 扩展用于 spawn
 
@@ -1013,40 +1050,92 @@ Wave 5（3 人关键路径 + 可并行点）
 | 不能再拆理由 | add_agent 的 RMW（read-modify-write）持锁窗口必须在同一函数内完成；拆开会让锁范围失控 |
 | 接口契约 | [§30.2](./interface-contracts.md#302-add_agent-扩展) |
 
-### W5-D29c — 写 `team_mcp_stdio_config` + `kill` + `get_or_build_task`
+### W5-D29c-1 — spawn 后写 `extra.team_mcp_stdio_config`
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 的中段：3 步外部调用） |
-| 职责 | 只做 3 步外部调用：<br>a. `conversation_service.update_extra(new_conv_id, {team_mcp_stdio_config: session.stdio_spec(new_slot_id).into_config()})`<br>b. `task_manager.kill(new_conv_id, Some(TeamSpawn))`（NotFound 视为成功）<br>c. `task_manager.get_or_build_task(new_conv_id, opts)` |
-| 依赖 | W5-D29b（拿到 new_conv_id / new_slot_id）+ W2 D7（stdio_spec）+ W2 D9 的 ensure_session 约定 |
-| 测试 | 2 条：update_extra 被按期调用；kill + get_or_build_task 按序被调 |
-| 预估 LoC | 80 · 预估人天 0.7 |
-| 接口契约 | [§30.3](./interface-contracts.md#303-write_extra--kill--rebuild) |
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 中段第 1 步） |
+| 职责 | 只做一件事：`conversation_service.update_extra(new_conv_id, {team_mcp_stdio_config: session.stdio_spec(new_slot_id).into_config()})` |
+| 依赖 | W5-D29b（new_conv_id/new_slot_id） + W2 D7a（stdio_spec） |
+| 测试 | 1 条：update_extra 被调且参数含 team_mcp_stdio_config |
+| 预估 LoC | 30 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.3.1](./interface-contracts.md#303-write_extra--kill--rebuild) |
 
-### W5-D29d — 欢迎消息 + wake + emit `team.agentSpawned`
+### W5-D29c-2 — spawn 后 `task_manager.kill` + `get_or_build_task`
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 的末段） |
-| 职责 | 只做"生效后通知"：<br>a. `mailbox.write(from=caller, to=new_slot_id, Message, content="You have been spawned as <name>. Read your mailbox and wait for instructions.")`<br>b. `wake(new_slot_id)`<br>c. `broadcaster.broadcast(WsEvent::TeamAgentSpawned {...})` |
-| 依赖 | W5-D29c + W4-D18a（wake lock） |
-| 测试 | 2 条：mailbox 含欢迎消息；WS 事件 team.agentSpawned 被广播 |
-| 预估 LoC | 60 · 预估人天 0.5 |
-| 接口契约 | [§30.4](./interface-contracts.md#304-欢迎消息--wake--事件) |
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 中段第 2/3 步） |
+| 职责 | 只做两步原子"重启 agent 进程"：`task_manager.kill(new_conv_id, Some(TeamSpawn))`（NotFound 视为成功）→ `task_manager.get_or_build_task(new_conv_id, opts)` |
+| 依赖 | W5-D29c-1（extra 已写）+ W2 D9（kill/get_or_build_task 已有） |
+| 测试 | 2 条：kill 被调；kill 后 get_or_build_task 被调 |
+| 预估 LoC | 50 |
+| 预估人天 | 0.4 |
+| 不能再拆理由 | kill + get_or_build_task 是 "进程重启" 组合原语（mcp.md §4.3 已确立这个不可拆语义）；拆开会让 DashMap 状态不一致（kill 成功但 rebuild 失败时无人负责回滚） |
+| 接口契约 | [§30.3.2](./interface-contracts.md#303-write_extra--kill--rebuild) |
+
+### W5-D29d-1 — spawn 后写欢迎消息到新 agent mailbox
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 1 步） |
+| 职责 | 只做一件事：`mailbox.write(from=caller_slot_id, to=new_slot_id, Message, content="You have been spawned as <name>. Read your mailbox and wait for instructions.")` |
+| 依赖 | W5-D29c-2（new agent 已就绪）|
+| 测试 | 1 条：mailbox 读 new_slot_id 的未读 = 1 条欢迎消息 |
+| 预估 LoC | 20 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.4.1](./interface-contracts.md#304-欢迎消息--wake--事件) |
+
+### W5-D29d-2 — spawn 后 wake 新 agent
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 2 步） |
+| 职责 | 只做一件事：调 `wake(new_slot_id)` 触发首次 role prompt 注入（D7a 的 compute_wake_input → D7b 的 send 路径） |
+| 依赖 | W5-D29d-1 + W4-D18a（wake lock 可用） + D7b（send 路径接 wake） |
+| 测试 | 1 条：wake 被调且 task_manager.send_message 收到 role prompt payload |
+| 预估 LoC | 20 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.4.2](./interface-contracts.md#304-欢迎消息--wake--事件) |
+
+### W5-D29d-3 — spawn 后 emit `team.agentSpawned` WS 事件
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/session.rs`（`spawn_agent` 末段第 3 步） |
+| 职责 | 只做一件事：`broadcaster.broadcast(WsEvent::TeamAgentSpawned { team_id, agent: new_agent })` |
+| 依赖 | W5-D29d-2 |
+| 测试 | 1 条：WS 订阅者收到 team.agentSpawned 事件且 payload 正确 |
+| 预估 LoC | 20 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§30.4.3](./interface-contracts.md#304-欢迎消息--wake--事件) |
 
 ---
 
-### W5-D30a — `team_send_message` 识别 `shutdown_approved`
+### W5-D30a-1 — `team_send_message` 识别 `shutdown_approved` 字符串
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（`handle_send_message` 顶部拦截 `message.trim() == "shutdown_approved"` 分支） |
-| 职责 | 只做 approved 拦截：识别 → 调 `scheduler.remove_agent(caller_slot_id)`（D30d 实现） → mailbox.write(to=leader, content="Teammate '<name>' has been removed (approved shutdown).") → wake leader |
-| 依赖 | W5-D30d（remove_agent 改造） |
-| 测试 | 2 条：approved 触发 remove_agent + leader 邮箱有通知；普通消息不走此分支 |
-| 预估 LoC | 80 · 预估人天 0.7 |
-| 接口契约 | [§31.1](./interface-contracts.md#311-approved-拦截) |
+| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（`handle_send_message` 顶部加 if 分支） |
+| 职责 | 只做识别分发：若 `message.trim() == "shutdown_approved"` → 调 D30a-2（处理分支）；否则走下面的 rejected / 普通消息分支 |
+| 依赖 | 无（纯字符串匹配） |
+| 测试 | 2 条：approved 走 approved 分支；普通消息不走 |
+| 预估 LoC | 20 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§31.1.1](./interface-contracts.md#311-approved-拦截) |
+
+### W5-D30a-2 — approved 处理：remove_agent + 通知 leader + wake
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（在 D30a-1 识别后调用的 async helper） |
+| 职责 | 只做已识别后的 approved 流程：<br>a. `scheduler.remove_agent(caller_slot_id)`（D30d 负责真 kill）<br>b. `mailbox.write(to=leader, content="Teammate '<name>' has been removed (approved shutdown).")`<br>c. `wake(leader_slot_id)` |
+| 依赖 | W5-D30a-1（识别） + W5-D30d-3（remove_agent 改造完整完成） |
+| 测试 | 3 条：remove_agent 被调；leader 邮箱有通知；leader 被 wake |
+| 预估 LoC | 60 |
+| 预估人天 | 0.5 |
+| 接口契约 | [§31.1.2](./interface-contracts.md#311-approved-拦截) |
 | 事实来源 | [aionui-audit §2.1 shutdown 协议](./aionui-audit.md#21-能力清单) |
 
 ### W5-D30b — `team_send_message` 识别 `shutdown_rejected: <reason>`
@@ -1072,17 +1161,42 @@ Wave 5（3 人关键路径 + 可并行点）
 | 接口契约 | [§31.3](./interface-contracts.md#313-shutdown_agent-目标-role-校验) |
 | 事实来源 | [aionui-audit §2.1 "Leader 不可 shutdown"](./aionui-audit.md#21-能力清单) |
 
-### W5-D30d — `TeammateManager::remove_agent` 真 kill + 清内部 state
+### W5-D30d-1 — `remove_agent` 改造：`task_manager.kill`
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 改造） |
-| 职责 | 只改 `remove_agent`：<br>a. `task_manager.kill(conv_id, Shutdown)` 真 kill<br>b. 清 W4-D18 的 `active_wakes` / `wake_timeouts`<br>c. 清 W4-D19 的 `finalized_turns`<br>d. slots 移除<br>e. emit `team.agentRemoved` |
-| 依赖 | W4-D18a/b + W4-D19a |
-| 测试 | 3 条：kill 被调；内部 state 清空；agentRemoved 事件广播 |
-| 预估 LoC | 80 · 预估人天 0.7 |
-| 不能再拆理由 | 清理 3 种内部 state 必须在同一原子点（清了 active_wakes 没清 wake_timeouts 会残留 timer）；kill 在清理前 / 后都错；必须一体 |
-| 接口契约 | [§31.4](./interface-contracts.md#314-remove_agent-真-kill) |
+| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 1 步） |
+| 职责 | 只做一件事：`task_manager.kill(conv_id, Some(AgentKillReason::Shutdown))`（NotFound 视为成功；其他 err 只 log 不阻塞） |
+| 依赖 | 无（既有 task_manager） |
+| 测试 | 2 条：kill 被调；kill NotFound 不 panic |
+| 预估 LoC | 25 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§31.4.1](./interface-contracts.md#314-remove_agent-真-kill) |
+
+### W5-D30d-2 — `remove_agent` 改造：清 `active_wakes` / `wake_timeouts` / `finalized_turns`
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 2 步；使用 W4-D18a/b-1/W4-D19a 已有 API） |
+| 职责 | 只做内部 state 清理 3 件（每件是 1 行调用，一起做是因为**同一个 remove_agent 函数内**，拆成跨函数反而让职责逃逸）：<br>a. `active_wakes.remove(slot_id)`（W4-D18a 提供）<br>b. `clear_wake_timeout(slot_id)`（W4-D18b-1 提供）<br>c. `finalized_turns.remove(conv_id)`（W4-D19a 提供） |
+| 依赖 | W4-D18a + W4-D18b-1 + W4-D19a |
+| 测试 | 1 条：三处 map 里该 slot_id/conv_id 都被清空 |
+| 预估 LoC | 15 |
+| 预估人天 | 0.2 |
+| 不能再拆理由 | 3 次 `.remove()` 调用，拆开就是"一人一行代码"的荒谬粒度 |
+| 接口契约 | [§31.4.2](./interface-contracts.md#314-remove_agent-真-kill) |
+
+### W5-D30d-3 — `remove_agent` 改造：`slots` 移除 + emit `team.agentRemoved`
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/scheduler.rs`（`remove_agent` 第 3 步） |
+| 职责 | 只做一件事：`slots.lock().remove(slot_id)` + `broadcaster.broadcast(WsEvent::TeamAgentRemoved { team_id, slot_id })` |
+| 依赖 | W5-D30d-1 + W5-D30d-2（前两步已完成） |
+| 测试 | 2 条：slots 里无该 slot_id；WS 订阅者收到 agentRemoved 事件 |
+| 预估 LoC | 25 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§31.4.3](./interface-contracts.md#314-remove_agent-真-kill) |
 | 事实来源 | [aionui-audit §2.1 TeammateManager.removeAgent](./aionui-audit.md#21-能力清单) |
 
 ---
@@ -1099,17 +1213,41 @@ Wave 5（3 人关键路径 + 可并行点）
 | 接口契约 | [§32.1](./interface-contracts.md#321-teammcpphase--payload-类型) |
 | 事实来源 | [aionui-audit §7.6 事件](./aionui-audit.md#76-事件--ipc后端等价需提供-websocket-或-sse) |
 
-### W5-D31b — `team.mcpStatus` 10 个生命周期点广播
+### W5-D31b-1 — `team.mcpStatus` tcp 层 2 点广播（mcp/server.rs）
 
 | 项 | 内容 |
 |---|---|
-| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（2 点：tcp_ready / tcp_error） + `crates/aionui-team/src/service.rs`（6 点：session_injecting / session_ready / session_error / config_write_failed / load_failed / degraded） + `crates/aionui-app/src/bridge.rs`（2 点：mcp_tools_waiting / mcp_tools_ready） |
-| 职责 | 只做在 10 个已知生命周期点插入 `broadcaster.broadcast(WsEvent::TeamMcpStatus {..})` 调用；不改业务逻辑 |
+| 目标文件 | `crates/aionui-team/src/mcp/server.rs`（在 TCP `bind` 成功 / 失败处各插一行 broadcast） |
+| 职责 | 只负责 server.rs 文件内 2 个点：`tcp_ready`（bind OK 后） + `tcp_error`（bind 失败分支）|
 | 依赖 | W5-D31a（payload 类型） |
-| 测试 | 2 条集成：正常 ensure_session 观察到 tcp_ready + session_ready；port 冲突 → tcp_error |
-| 预估 LoC | 80 · 预估人天 0.8 |
-| 不能再拆理由 | 10 个点都是同一个事件类型的分布式 emit，拆成每点一人会造成一人一行"广播调用"的极端碎片 |
-| 接口契约 | [§32.2](./interface-contracts.md#322-10-phase-广播点) |
+| 测试 | 2 条：正常 start 观察到 tcp_ready；port 冲突 → tcp_error |
+| 预估 LoC | 30 |
+| 预估人天 | 0.3 |
+| 接口契约 | [§32.2.1](./interface-contracts.md#322-10-phase-广播点) |
+
+### W5-D31b-2 — `team.mcpStatus` service 层 6 点广播（service.rs）
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-team/src/service.rs`（`ensure_session` 的 6 个分支处各插 broadcast） |
+| 职责 | 只负责 service.rs 内 6 个点：`session_injecting`（循环 agents 开始） + `session_ready`（sessions.insert 成功） + `session_error`（任一 agent 失败回滚） + `config_write_failed`（update_extra 失败） + `load_failed`（get_or_build_task 失败） + `degraded`（wait_for_mcp_ready timeout，hook W4-D24b-3） |
+| 依赖 | W5-D31a + W4-D24b-3（degraded 需要 wait_for_mcp_ready 的 timeout 信号）|
+| 测试 | 2 条集成：正常 ensure_session 观察到 session_ready；模拟 update_extra 失败 → config_write_failed |
+| 预估 LoC | 40 |
+| 预估人天 | 0.4 |
+| 接口契约 | [§32.2.2](./interface-contracts.md#322-10-phase-广播点) |
+
+### W5-D31b-3 — `team.mcpStatus` bridge 层 2 点广播（app/bridge.rs）
+
+| 项 | 内容 |
+|---|---|
+| 目标文件 | `crates/aionui-app/src/bridge.rs`（bridge 的 tools/list 前 / 后两个时机） |
+| 职责 | 只负责 bridge.rs 内 2 个点：`mcp_tools_waiting`（bridge 连 TCP 成功、tools/list 未返前） + `mcp_tools_ready`（tools/list 成功返回后） |
+| 依赖 | W5-D31a + D6（bridge 主体）+ W4-D24c（`mcp_ready` 已发） |
+| 测试 | 1 条集成：bridge 启动 → 观察到 mcp_tools_waiting → 观察到 mcp_tools_ready |
+| 预估 LoC | 25 |
+| 预估人天 | 0.2 |
+| 接口契约 | [§32.2.3](./interface-contracts.md#322-10-phase-广播点) |
 
 ### W5-D31c — `teammate_message` 左气泡 emit
 
@@ -1125,24 +1263,28 @@ Wave 5（3 人关键路径 + 可并行点）
 
 ---
 
-## 4. 分配表（全 5 Wave · 66 人模块，"拆到不能再拆"）
+## 4. 分配表（全 5 Wave · 88 人模块，"拆到不能再拆" 二轮）
 
 | 开发者 | Wave | 模块 | 文件 | LoC | 人天 |
 |:---:|:---:|---|---|:-:|:---:|
 | D1 | 1 | team_mcp types | `aionui-api-types/src/team_mcp.rs` | 40 | 0.5 |
 | D2 | 1 | AcpBuildExtra 字段 | `aionui-ai-agent/src/types.rs` | 15 | 0.3 |
 | D3 | 1 | Stdio ServerSpec | `aionui-team/src/mcp/bridge.rs` | 80 | 1.0 |
-| D4 | 1 | 两个新 MCP 工具 | `aionui-team/src/mcp/{tools,server}.rs` | 150 | 1.0 |
+| D4 | 1 | 两个新 MCP 工具（list_models / describe_assistant） | `aionui-team/src/mcp/{tools,server}.rs` | 150 | 1.0 |
+| **D4b** | 1 | **`TEAM_SPAWN_AGENT_DESCRIPTION` 原文常量**（P0#48 补漏） | `aionui-team/src/mcp/tools.rs` | 40 | 0.3 |
 | D5a | 1 | Team Guide Prompt | `aionui-team/src/prompts/team_guide.rs` | 120 | 0.5 |
 | D5b-1 | 1 | Lead Prompt 常量 (include_str! txt) | `lead.rs` + `prompt_templates/lead.txt` | ⚠️ 48 rust+188 txt | 0.3 |
 | D5b-2 | 1 | Lead Prompt builder | `aionui-team/src/prompts/lead.rs` | 30 | 0.5 |
 | D5c | 1 | Teammate Prompt + wake payload | `aionui-team/src/prompts/teammate.rs` | ⚠️ 150 | 1.0 |
 | D6 | 1 | mcp-bridge subcommand | `aionui-app/src/bridge.rs` | 180 | 1.5 |
-| D7 | 2 | TeamSession 新方法 + send 路径接 wake | `aionui-team/src/session.rs` | ⚠️ 280 | 3.0 |
+| **D7a** | 2 | **TeamSession 三个新方法（compute/spec/finish）** | `aionui-team/src/session.rs` | 150 | 1.5 |
+| **D7b** | 2 | **send 路径接 wake + `files` 附件 + log-not-throw**（P0#45/#46） | `aionui-team/src/session.rs` + `aionui-api-types/src/team.rs` + `routes.rs` | 120 | 1.2 |
+| **D7c** | 2 | **`send_message_to_agent(silent=true)` 占位** | `aionui-team/src/session.rs` | 40 | 0.3 |
 | D8 | 2 | Scheduler 首次 wake | `aionui-team/src/scheduler.rs` | 120 | 1.5 |
 | D9 | 2 | ensure_session 闭环 | `aionui-team/src/service.rs` | ⚠️ 200 | 2.0 |
 | D10 | 2 | acp_agent 注入 | `aionui-ai-agent/src/acp_agent.rs` | 60 | 1.0 |
 | D11 | 2 | app 装配 + smoke test | `aionui-app/*` | 180 | 2.0 |
+| **D11.5** | 2 | **`remove_team` 级联 kill agent 进程**（P0#47 补漏） | `aionui-team/src/service.rs` | 40 | 0.3 |
 | W3-D12a | 3 | `list_teams(user_id)` | service / repo / routes | 40 | 0.3 |
 | W3-D12b | 3 | `get_team(user_id, id)` 归属校验 | service / routes | 40 | 0.3 |
 | W3-D12c | 3 | `remove_team(user_id, id)` 归属校验 | service / routes | 40 | 0.3 |
@@ -1161,55 +1303,72 @@ Wave 5（3 人关键路径 + 可并行点）
 | W3-D17b | 3 | tool call 300s 超时 | common/lib.rs + mcp/server.rs | 40 | 0.3 |
 | W4-D25a | 4 | `AgentStreamChunk` enum | ai-agent/types.rs | 40 | 0.3 |
 | W4-D25b | 4 | `subscribe_stream()` trait 方法 | ai-agent/task_manager.rs | 40 | 0.3 |
-| W4-D25c | 4 | `AcpAgentManager` broadcast 注入 + 全 chunk emit | ai-agent/acp_agent.rs | 100 | 1.2 |
+| **W4-D25c-1** | 4 | **broadcast channel 字段 + impl subscribe_stream** | ai-agent/acp_agent.rs | 50 | 0.5 |
+| **W4-D25c-2** | 4 | **全 chunk emit 点注入（5 个 chunk 处理点）** | ai-agent/acp_agent.rs | 50 | 0.5 |
 | W4-D18a | 4 | `active_wakes` 重入锁 | team/scheduler.rs | 60 | 0.5 |
-| W4-D18b | 4 | `wake_timeouts` 60s 看门狗 | team/scheduler.rs | 120 | 1.5 |
+| **W4-D18b-1** | 4 | **wake_timeouts 存储字段 + clear_wake_timeout** | team/scheduler.rs | 30 | 0.2 |
+| **W4-D18b-2** | 4 | **arm_wake_timeout spawn task（select! 主体）** | team/scheduler.rs | 90 | 1.0 |
 | W4-D18c | 4 | session 接入 wake lock | team/session.rs | 60 | 0.5 |
 | W4-D19a | 4 | `finalized_turns` 存储 + API | team/scheduler.rs | 80 | 0.7 |
 | W4-D19b | 4 | session 接入 dedup | team/session.rs | 50 | 0.4 |
 | W4-D20a | 4 | `detect_crash` 纯函数 | team/scheduler.rs | 60 | 0.5 |
-| W4-D20b | 4 | `handle_agent_crash` 非 leader 流程 | team/scheduler.rs | 100 | 1.0 |
+| **W4-D20b-1** | 4 | **非 leader crash：写 testament helper** | team/scheduler.rs | 40 | 0.4 |
+| **W4-D20b-2** | 4 | **非 leader crash：kill + 清 state + wake leader** | team/scheduler.rs | 60 | 0.6 |
 | W4-D20c | 4 | `handle_agent_crash` leader 分支 | team/scheduler.rs | 40 | 0.3 |
 | W4-D21 | 4 | 429 / rate-limit 识别 | common/lib.rs + team/session.rs | 50 | 0.3 |
 | W4-D22 | 4 | Inactivity watchdog handler | team/scheduler.rs | 100 | 1.0 |
 | W4-D23 | 4 | `add_agent_locks` 串行化 | team/service.rs | 80 | 0.7 |
 | W4-D24a | 4 | `McpReadyNotification` 协议类型 | team/mcp/protocol.rs | 40 | 0.3 |
-| W4-D24b | 4 | Server notify + wait graceful | team/mcp/server.rs | 100 | 1.0 |
+| **W4-D24b-1** | 4 | **TeamMcpServer ready 数据结构字段** | team/mcp/server.rs | 20 | 0.2 |
+| **W4-D24b-2** | 4 | **notify_mcp_ready 方法** | team/mcp/server.rs | 30 | 0.3 |
+| **W4-D24b-3** | 4 | **wait_for_mcp_ready graceful select!** | team/mcp/server.rs | 50 | 0.5 |
 | W4-D24c | 4 | Bridge 发 mcp_ready | app/bridge.rs | 30 | 0.2 |
 | W5-D26a | 5 | `GuideMcpServer` 结构 + 启停 | team/guide/server.rs | 80 | 0.8 |
-| W5-D26b | 5 | `handle_aion_create_team` handler | team/guide/handlers.rs | 100 | 1.0 |
+| **W5-D26b-1** | 5 | **`aion_create_team` args 解析 + 默认值（纯函数）** | team/guide/handlers.rs | 70 | 0.6 |
+| **W5-D26b-2** | 5 | **`handle_aion_create_team` 调 service + 返回结构化** | team/guide/handlers.rs | 70 | 0.7 |
 | W5-D26c | 5 | `handle_aion_list_models` handler | team/guide/handlers.rs | 40 | 0.3 |
 | W5-D26d | 5 | 建团成功后 3 个 WS 事件 | team/guide/handlers.rs | 50 | 0.4 |
 | W5-D27 | 5 | Guide stdio bridge 分支 | app/bridge.rs | 80 | 0.7 |
 | W5-D28a | 5 | `is_team_capable_backend` 纯函数 | team/guide/capability.rs | 40 | 0.3 |
 | W5-D28b | 5 | Guide prompt 注入到 instructions | ai-agent/acp_agent.rs | 60 | 0.5 |
 | W5-D28c | 5 | `session/new.mcp_servers` 追加 Guide | ai-agent/acp_agent.rs | 60 | 0.5 |
-| W5-D29a | 5 | `SpawnAgentRequest` + 校验层 | team/session.rs | 80 | 0.7 |
+| **W5-D29a-1** | 5 | **`SpawnAgentRequest` 类型 + spawn_agent 骨架** | team/session.rs | 30 | 0.2 |
+| **W5-D29a-2** | 5 | **spawn_agent 校验：caller role = Lead** | team/session.rs | 20 | 0.2 |
+| **W5-D29a-3** | 5 | **spawn_agent 校验：name 归一化 + 唯一性** | team/session.rs | 25 | 0.2 |
+| **W5-D29a-4** | 5 | **spawn_agent 校验：backend 白名单** | team/session.rs | 25 | 0.2 |
 | W5-D29b | 5 | `add_agent` 扩展用于 spawn | team/service.rs | 100 | 1.0 |
-| W5-D29c | 5 | 写 extra + kill + rebuild | team/session.rs | 80 | 0.7 |
-| W5-D29d | 5 | 欢迎消息 + wake + spawn WS 事件 | team/session.rs | 60 | 0.5 |
-| W5-D30a | 5 | `shutdown_approved` 拦截 | team/mcp/server.rs | 80 | 0.7 |
+| **W5-D29c-1** | 5 | **spawn 后写 `extra.team_mcp_stdio_config`** | team/session.rs | 30 | 0.2 |
+| **W5-D29c-2** | 5 | **spawn 后 kill + get_or_build_task** | team/session.rs | 50 | 0.4 |
+| **W5-D29d-1** | 5 | **spawn 后写欢迎消息到 mailbox** | team/session.rs | 20 | 0.2 |
+| **W5-D29d-2** | 5 | **spawn 后 wake 新 agent** | team/session.rs | 20 | 0.2 |
+| **W5-D29d-3** | 5 | **spawn 后 emit `team.agentSpawned` 事件** | team/session.rs | 20 | 0.2 |
+| **W5-D30a-1** | 5 | **识别 `shutdown_approved` 字符串** | team/mcp/server.rs | 20 | 0.2 |
+| **W5-D30a-2** | 5 | **approved 处理：remove_agent + 通知 leader + wake** | team/mcp/server.rs | 60 | 0.5 |
 | W5-D30b | 5 | `shutdown_rejected` 拦截 | team/mcp/server.rs | 50 | 0.4 |
 | W5-D30c | 5 | `shutdown_agent` 目标 role 校验 | team/scheduler.rs | 30 | 0.2 |
-| W5-D30d | 5 | `remove_agent` 真 kill + 清内部 state | team/scheduler.rs | 80 | 0.7 |
+| **W5-D30d-1** | 5 | **remove_agent：task_manager.kill** | team/scheduler.rs | 25 | 0.2 |
+| **W5-D30d-2** | 5 | **remove_agent：清 active_wakes / wake_timeouts / finalized_turns** | team/scheduler.rs | 15 | 0.2 |
+| **W5-D30d-3** | 5 | **remove_agent：slots 移除 + emit `team.agentRemoved`** | team/scheduler.rs | 25 | 0.2 |
 | W5-D31a | 5 | `TeamMcpPhase` enum + payload 类型 | api-types/team.rs | 60 | 0.4 |
-| W5-D31b | 5 | 10 phase 广播点 | 散落 server / service / bridge | 80 | 0.8 |
+| **W5-D31b-1** | 5 | **`team.mcpStatus` tcp 层 2 点广播** | mcp/server.rs | 30 | 0.3 |
+| **W5-D31b-2** | 5 | **`team.mcpStatus` service 层 6 点广播** | service.rs | 40 | 0.4 |
+| **W5-D31b-3** | 5 | **`team.mcpStatus` bridge 层 2 点广播** | app/bridge.rs | 25 | 0.2 |
 | W5-D31c | 5 | `teammate_message` 左气泡 emit | team/session.rs | 40 | 0.3 |
 
-**合计**：66 人模块 · 约 46.3 人天（单人累计）。标 ⚠️ 的 5 个模块（D5b-1 prompt txt / D5c / D7 / D9 / 无）为已获 leader 批准的 200 行例外；其余全部 ≤ 120 行。
+**合计**：88 人模块 · 约 51 人天（单人累计）。**粗体** = 二轮拆分新增的 22 个模块。标 ⚠️ 的 3 个模块（D5b-1 prompt txt / D5c / D9）为 Wave 1/2 已批准的 200 行例外；其余**全部 ≤ 120 行**。
 
-**并行压缩**：
-- Wave 1 并行 9 人（D1/D2/D3/D4/D5a/D5b-1/D5b-2/D5c/D6） → 关键路径 1.5 天
-- Wave 2 关键路径 D7(3) → D9(2) → D11(2) = 7 天；D8 / D10 同步进行
-- Wave 3：16 人并行。关键路径 W3-D13a(0.5) → W3-D13b(0.8) → W3-D13c(0.3) = 1.6 天；其他串按 D12a/b/c 互等 D13a，D14a→b→c，D15a→b，D16a→b→c；整 Wave 3 ≈ 2 天
-- Wave 4：W4-D25a(0.3) → W4-D25b(0.3) → W4-D25c(1.2) = 1.8 天底座；之后 14 人并行 ≈ 1.5 天（最长链 D18a+D18b+D18c = 2.5）；Wave 4 整体 ≈ 4 天
-- Wave 5：并行度取决于 D29 链能否和 D26→D27→D28 链同时推进。关键链 D26a → D26b → D26d ≈ 2 天；D29 链 4 人串（0.7+1.0+0.7+0.5）= 2.9 天；D30 四子模块中 D30a/D30b 需等 D29d，D30c 独立，D30d 依赖 D18/D19；D31 三子模块 a 最先，b/c 依赖 a；Wave 5 关键路径 D29 链 + D30 依赖 ≈ 6 天
-- **建议总工期**：6 周（Wave 1+2 = 2 周，Wave 3 = 0.5 周，Wave 4 = 1 周，Wave 5 = 1.5 周，buffer 1 周覆盖返工 + 真 CLI 跑不起来降级）
+**并行压缩**（更新版）：
+- Wave 1 并行 10 人（D1/D2/D3/D4/D4b/D5a/D5b-1/D5b-2/D5c/D6） → 关键路径 1.5 天
+- Wave 2 关键路径 D7a(1.5) → D7b(1.2) → D7c(0.3) → D11.5(0.3) 串行于 session.rs / service.rs（同文件不并行）；D8/D9/D10/D11 可并行；整 Wave 2 ≈ 4 天
+- Wave 3：16 人并行，关键路径 W3-D13a → W3-D13b → W3-D13c ≈ 1.6 天
+- Wave 4：底座 W4-D25a → W4-D25b → W4-D25c-1 → W4-D25c-2 ≈ 1.6 天；之后 17 人并行最长链 W4-D18b-1 → W4-D18b-2（1.2 天）+ D18c（0.5）= 1.7 天；W4-D24b 链 b-1/b-2/b-3 ≈ 1 天；Wave 4 整体 ≈ 3.5 天
+- Wave 5：关键路径 D26a → D26b-1 → D26b-2 → D26d ≈ 2.5 天；D29 链 D29a-1..4(0.8) → D29b(1.0) → D29c-1/c-2(0.6) → D29d-1/d-2/d-3(0.6) ≈ 3.0 天；D29 / D30 / D31 部分并行；Wave 5 整体 ≈ 6 天
+- **建议总工期**：6 周（Wave 1+2 = 2 周，Wave 3 = 0.5 周，Wave 4 = 1 周，Wave 5 = 1.5 周，buffer 1 周）
 
 **可增加并行度**：
-- Wave 3 用满 16 人后无法再提速（D13 链串，其他人等短）
-- Wave 4 的 D18a/b/c 虽然 3 人串但 D18b 内部 tokio select! 无法再拆
-- Wave 5 的 D26 链（server → handler → events）是最长关键路径；D27/D28 可与 D26d 后并行
+- Wave 3 关键路径是 D13 链，16 人并行已达极限
+- Wave 4 底座 D25a/b/c-1/c-2 必须串行（同文件 acp_agent.rs）
+- Wave 5 D29 链多人同改 session.rs，必须串 merge（同文件不并行）——这是"一人一模块"粒度最极致后的物理约束
 
 ---
 

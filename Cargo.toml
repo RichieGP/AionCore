@@ -21,6 +21,7 @@ members = [
     "crates/aionui-cron",
     "crates/aionui-assistant",
     "crates/aionui-app",
+    "crates/aion-cli",
 ]
 
 [workspace.package]
@@ -84,7 +85,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
@@ -105,6 +106,10 @@ dashmap = "6"
 
 # WebSocket
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
+# TUI
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28"] }
+crossterm = "0.28"
 
 # Protobuf
 prost = "0.13"

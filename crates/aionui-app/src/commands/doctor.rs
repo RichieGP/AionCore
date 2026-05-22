@@ -57,8 +57,8 @@ fn print_environment(merged_path: &str, data_dir: &Path) {
     println!("  data-dir       : {}", data_dir.display());
     println!("  PATH segments  : {path_segments}");
     println!("  PATH length    : {}", merged_path.len());
-    if let Some(p) = std::env::var_os("AIONUI_BUN_PATH") {
-        println!("  AIONUI_BUN_PATH: {}", PathBuf::from(p).display());
+    if let Some(p) = std::env::var_os("AIONUI_NODE_PATH") {
+        println!("  AIONUI_NODE_PATH: {}", PathBuf::from(p).display());
     }
     println!();
 }

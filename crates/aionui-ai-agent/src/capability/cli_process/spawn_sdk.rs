@@ -151,27 +151,17 @@ impl CliAgentProcess {
     }
 
     /// Build environment variables for agent subprocess spawn.
-    /// Mirrors the frontend `acpConnectors.ts::getCleanAgentEnv` logic:
-    /// - Set BUN_INSTALL_CACHE_DIR / BUN_TMPDIR to stable paths under
-    ///   the backend's `AppConfig.data_dir`
-    /// - Set CLAUDE_CODE_EXECUTABLE so claude-agent-sdk finds the CLI
-    fn agent_spawn_env(data_dir: &Path) -> Vec<(String, String)> {
-        let bun_cache = data_dir.join("bun-cache");
-        let bun_tmp = data_dir.join("bun-tmp");
-
-        let mut env = vec![
-            ("BUN_INSTALL_CACHE_DIR".into(), bun_cache.to_string_lossy().into_owned()),
-            ("BUN_TMPDIR".into(), bun_tmp.to_string_lossy().into_owned()),
-        ];
-
-        // PATH enrichment (including bundled bun dir) is handled globally by
-        // `aionui_runtime::enhance_process_path` during startup; children
-        // inherit it automatically. No per-spawn injection needed.
-
+    ///
+    /// PATH enrichment (including the bundled node bin dir) is handled
+    /// globally by `aionui_runtime::enhance_process_path` during startup;
+    /// children inherit it automatically. The only per-spawn addition is
+    /// `CLAUDE_CODE_EXECUTABLE`, which `claude-agent-sdk` reads to skip
+    /// its own `which` lookup.
+    fn agent_spawn_env(_data_dir: &Path) -> Vec<(String, String)> {
+        let mut env = Vec::new();
         if let Some(claude_path) = Self::find_native_claude() {
             env.push(("CLAUDE_CODE_EXECUTABLE".into(), claude_path));
         }
-
         env
     }
 

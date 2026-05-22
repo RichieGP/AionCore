@@ -37,6 +37,8 @@ impl From<ExtractError> for ResolveError {
 
 static RESOLVED_BUN: OnceLock<PathBuf> = OnceLock::new();
 static BUN_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+static RESOLVED_NODE: OnceLock<PathBuf> = OnceLock::new();
+static NODE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Returns the path to a usable `bun` executable.
 ///
@@ -61,6 +63,78 @@ pub fn bun_bin_dir() -> Option<PathBuf> {
                 .and_then(|p| p.parent().map(PathBuf::from))
         })
         .clone()
+}
+
+/// Returns the path to the bundled `node` executable.
+///
+/// Priority: `AIONUI_NODE_PATH` env override > embedded blob (extract on first call) > error.
+/// Unlike `resolve_bun`, there is no `which("node")` fallback — offline-first
+/// + version pinning are explicit goals.
+pub fn resolve_node() -> Result<PathBuf, ResolveError> {
+    if let Some(path) = RESOLVED_NODE.get() {
+        return Ok(path.clone());
+    }
+    let resolved = resolve_node_with(&crate::embed::ProductionEmbedNode)?;
+    let _ = RESOLVED_NODE.set(resolved.clone());
+    Ok(resolved)
+}
+
+/// Returns the directory containing the bundled `node` (i.e. `<dir>/bin`).
+/// `None` when no embed and no env override.
+pub fn node_bin_dir() -> Option<PathBuf> {
+    NODE_DIR
+        .get_or_init(|| {
+            resolve_node_with(&crate::embed::ProductionEmbedNode)
+                .ok()
+                .and_then(|p| p.parent().map(PathBuf::from))
+        })
+        .clone()
+}
+
+/// Returns the path to the bundled `npm-cli.js`. Errors if `resolve_node`
+/// errors, or if the expected file is missing under the node dir.
+pub fn resolve_npm_cli_js() -> Result<PathBuf, ResolveError> {
+    let node = resolve_node()?;
+    // node lives at <root>/bin/node[.exe] → npm-cli.js at <root>/lib/...
+    let root = node.parent().and_then(|p| p.parent()).ok_or(ResolveError::NotFound)?;
+    let cli = root.join("lib/node_modules/npm/bin/npm-cli.js");
+    if cli.is_file() {
+        Ok(cli)
+    } else {
+        Err(ResolveError::NotFound)
+    }
+}
+
+fn resolve_node_with<E: crate::embed::EmbeddedNode>(embed: &E) -> Result<PathBuf, ResolveError> {
+    if let Some(p) = node_env_override() {
+        return Ok(p);
+    }
+    if !embed.has() {
+        return which::which("node").map_err(|_| ResolveError::NotFound);
+    }
+    let dir = cache::node_dir(embed.version(), embed.sha256()).ok_or(ResolveError::NotFound)?;
+    let node_bin = dir.join(if cfg!(windows) { "bin/node.exe" } else { "bin/node" });
+
+    if extract::is_node_fresh(&dir, embed.sha256(), embed.version()) && node_bin.is_file() {
+        return Ok(node_bin);
+    }
+    extract::extract_node_into(&dir, embed.blob(), embed.sha256(), embed.version())?;
+    Ok(node_bin)
+}
+
+fn node_env_override() -> Option<PathBuf> {
+    let raw = std::env::var("AIONUI_NODE_PATH").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    if p.is_file() {
+        Some(p)
+    } else {
+        tracing::warn!(path = %p.display(), "AIONUI_NODE_PATH does not point to a file; ignoring");
+        None
+    }
 }
 
 fn resolve_with<E: EmbeddedBun>(embed: &E) -> Result<PathBuf, ResolveError> {
@@ -389,5 +463,46 @@ mod tests {
             "expected the .cmd shim; got {}",
             found.display()
         );
+    }
+
+    #[test]
+    fn resolve_node_with_no_embed_returns_not_found_or_falls_back() {
+        // No embed + no override → either NotFound, or which-resolves to a
+        // host node. Both correct.
+        unsafe {
+            std::env::remove_var("AIONUI_NODE_PATH");
+        }
+        let fake = crate::embed::FakeEmbedNode {
+            has: false,
+            blob: b"",
+            sha256: "",
+            version: "",
+            dir_name: "",
+        };
+        match resolve_node_with(&fake) {
+            Ok(_) | Err(ResolveError::NotFound) => {}
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_node_env_override_wins_over_embed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        unsafe {
+            std::env::set_var("AIONUI_NODE_PATH", &path);
+        }
+        let fake = crate::embed::FakeEmbedNode {
+            has: true,
+            blob: b"x",
+            sha256: "0",
+            version: "0",
+            dir_name: "node-0-0",
+        };
+        let result = resolve_node_with(&fake).unwrap();
+        assert_eq!(result, path);
+        unsafe {
+            std::env::remove_var("AIONUI_NODE_PATH");
+        }
     }
 }

@@ -12,7 +12,10 @@ mod resolver;
 mod shell_env;
 
 pub use cache::init;
-pub use resolver::{ResolveError, bun_bin_dir, resolve_bun, resolve_command_in, resolve_command_path};
+pub use resolver::{
+    ResolveError, bun_bin_dir, node_bin_dir, resolve_bun, resolve_command_in, resolve_command_path, resolve_node,
+    resolve_npm_cli_js,
+};
 pub use shell_env::enhance_process_path;
 mod spawn;
 pub use spawn::Builder;

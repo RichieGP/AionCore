@@ -379,11 +379,35 @@ pub(super) fn timeout_result(duration: Duration) -> McpConnectionTestResult {
 
 pub(super) fn spawn_error_result(command: &str, error: &std::io::Error) -> McpConnectionTestResult {
     let msg = match error.kind() {
-        std::io::ErrorKind::NotFound => format!("Command not found: {command}"),
+        std::io::ErrorKind::NotFound => command_not_found_message(command),
         std::io::ErrorKind::PermissionDenied => format!("Permission denied: {command}"),
         _ => format!("Failed to start '{command}': {error}"),
     };
     error_result(msg)
+}
+
+fn command_not_found_message(command: &str) -> String {
+    let mut command_name = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat"] {
+        if let Some(stripped) = command_name.strip_suffix(suffix) {
+            command_name = stripped.to_owned();
+            break;
+        }
+    }
+
+    if matches!(command_name.as_str(), "npx" | "npm" | "node") {
+        return format!(
+            "Command not found: {command}. Install Node.js (which includes npm/npx), then restart AionUI or configure this MCP server to use an absolute command path."
+        );
+    }
+
+    format!(
+        "Command not found: {command}. Install the command or configure this MCP server to use an absolute command path."
+    )
 }
 
 pub(super) fn rpc_error_result(method: &str, err: &JsonRpcError) -> McpConnectionTestResult {
@@ -595,7 +619,20 @@ mod tests {
     fn spawn_error_not_found() {
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
         let result = spawn_error_result("npx", &err);
-        assert!(result.error.unwrap().contains("Command not found: npx"));
+        let error = result.error.unwrap();
+        assert!(error.contains("Command not found: npx"));
+        assert!(error.contains("Install Node.js"));
+        assert!(error.contains("absolute command path"));
+    }
+
+    #[test]
+    fn spawn_error_not_found_generic_command() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let result = spawn_error_result("missing-mcp", &err);
+        let error = result.error.unwrap();
+        assert!(error.contains("Command not found: missing-mcp"));
+        assert!(error.contains("Install the command"));
+        assert!(error.contains("absolute command path"));
     }
 
     #[test]

@@ -634,13 +634,29 @@ managed Node 引入异步 install 后，还必须定义并发去重策略。
 - `warmup` 成功即 ready
 - install 失败能进入现有 send failure / connection test error 路径
 - 日志能区分“task build 中等待 managed runtime”与“CLI 已启动但握手失败”
+- 不新增“是否下载 Node”确认弹框
+- 不做安装进度条
+- 但必须补足最小状态表达，且尽量复用现有 loading / error UI
 
-如果后续要进一步优化体验，可以增加：
+第一阶段的前端/交互要求：
 
-- 首次 build 超过阈值时的“正在准备 Node 环境”状态事件
-- install progress 的前端提示
+- `warmup`、MCP connection test、custom agent try-connect、Office install/update 这些显式动作，前端必须有 loading 和 error feedback
+- `send_message` 不要求新增专门的下载交互，也不要求展示安装进度条
+- `send_message` 若因 runtime 准备失败，必须能通过现有 failure tip / error 路径让用户感知失败
 
-但这些属于增强项，不是第一阶段闭环所必需。
+换句话说，第一阶段的产品原则是：
+
+- 不做前端确认弹框
+- 不做进度条
+- 但不能让用户“无提示地等待”或“无解释地失败”
+
+第二阶段必须补齐体验层能力，而不是可选增强项：
+
+- 首次 build 超过阈值时，发出“正在准备 Node 环境”的状态事件
+- 前端展示 install progress 或至少阶段性状态
+- 为首次初始化补一条明确提示文案，帮助用户理解为何第一次会更慢
+
+这三项在第一阶段可以暂缓，但在第二阶段必须完成。
 
 ### MCP 执行链路
 
@@ -796,6 +812,9 @@ pub enum RuntimeCommandError {
 - install lock
 - retry classification
 - old-version cleanup
+- runtime preparing 状态事件
+- install progress 或阶段性状态展示
+- 首次初始化提示文案
 
 ### 阶段三：可选产品能力
 

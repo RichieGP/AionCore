@@ -275,17 +275,76 @@ managed runtime 目录布局：
 
 ### system runtime 接受条件
 
-只有在当前进程环境中同时满足以下条件时，才接受 system runtime：
+system runtime 的判断应采用“先选 runtime，再派生命令”的模型，而不是把 `node`、`npm`、`npx` 当成三个独立 PATH 命令分别判断。
 
-- `which(node)`
-- `which(npm)`
-- `which(npx)`
-- `node --version`
-- `npm --version`
-- `npx --version`
-- Node 版本 `>= 22.0.0`
+第一阶段建议采用保守且可诊断的接受规则：
 
-只要任一项失败，就拒绝整个 system runtime。
+1. `which(node)` 成功。
+2. 对 `node` 的结果做 `canonicalize`，并能稳定推出一个 runtime root。
+3. 从这个 runtime root 派生出 `npm` command plan 与 `npx` command plan。
+4. 对以下三条最终命令做真实执行校验：
+   - `node --version`
+   - 派生出的 npm command plan + `--version`
+   - 派生出的 npx command plan + `--version`
+5. 三条命令都满足：
+   - 进程可启动
+   - 退出码为 `0`
+   - stdout 可解析为版本号
+6. `node` 版本 `>= 22.0.0`
+
+只要任一项失败，就拒绝整个 system runtime，并切换到 managed runtime。
+
+这里的关键点是：
+
+- `npm` 和 `npx` 不再是独立 source of truth
+- `node` 是 system runtime 的主入口
+- `npm` / `npx` 必须由该 `node` 所属 runtime 派生出来
+
+这比“三次独立 `which`”更符合 runtime/toolchain 模型，也更接近外部成熟方案的默认思路。
+
+### system runtime root 推导
+
+第一阶段只接受能够稳定推出 root 的布局。
+
+推荐规则：
+
+- Unix：
+  - 如果 `node` 是 `<root>/bin/node`，则 runtime root 为 `<root>`
+- Windows：
+  - 如果 `node` 是 `<root>/node.exe`，则 runtime root 为 `<root>`
+
+如果 `node` 的真实路径无法稳定推出明确 root，则不要继续猜测 PATH 上的 `npm` / `npx`，而是直接拒绝 system runtime。
+
+### system npm / npx 派生规则
+
+从 runtime root 派生，而不是再次把 PATH 作为事实来源。
+
+第一阶段建议：
+
+- Unix 优先尝试：
+  - `<root>/bin/npm`
+  - `<root>/bin/npx`
+- Windows 优先尝试：
+  - `<root>/npm.cmd`
+  - `<root>/npx.cmd`
+
+如果平台上的 wrapper 形式不稳定，允许退回到 Node entrypoint 方案：
+
+- `node <root>/lib/node_modules/npm/bin/npm-cli.js`
+- `node <root>/lib/node_modules/npm/bin/npx-cli.js`
+
+最终是否接受，不由“文件是否存在”决定，而由最终 command plan 的真实执行结果决定。
+
+### 关于 shim / version manager 环境
+
+像 Volta、asdf、nvm 这类环境，本质上也是通过 shim 或安装目录来管理整套 toolchain。
+
+第一阶段应保守处理：
+
+- 如果 shim 最终 `canonicalize` 后仍能稳定落到一套明确 runtime root，则可以接受
+- 如果无法稳定推出 runtime root，就拒绝 system runtime，回退 managed runtime
+
+这样做的目标不是兼容所有奇异 PATH 组合，而是在自动选择 system runtime 时优先保证稳定性和可诊断性。
 
 ### managed runtime 接受条件
 

@@ -292,11 +292,49 @@ managed runtime 目录布局：
 managed runtime 只有在以下条件都满足时才算有效：
 
 - 安装目录结构存在
-- `node --version` 成功
-- managed npm command 成功
-- managed npx command 成功
+- `node --version` 成功，且 stdout 可解析为 semver
+- managed npm 的最终 command plan 执行 `--version` 成功
+- managed npx 的最终 command plan 执行 `--version` 成功
 
 校验必须执行真实命令，不能只检查文件是否存在。
+
+这里的“成功”有精确定义，不是“文件存在”或“看起来能用”，而是：
+
+- 使用未来真实执行时同一套 command plan
+- 能成功启动进程
+- 退出码为 `0`
+- stdout 可解析为版本号
+
+推荐的校验方式：
+
+```text
+{managed-node} --version
+{managed-npm-command-plan} --version
+{managed-npx-command-plan} --version
+```
+
+其中：
+
+- managed npm command plan 可能是 `bin/npm --version`
+- 也可能是 `node npm-cli.js --version`
+- managed npx command plan 可能是 `bin/npx --version`
+- 也可能是 `node npx-cli.js --version`
+
+具体采用哪一种，不由文档预设，而由 runtime 实现根据平台和所选模式生成。
+
+这类检查的目标是确认“managed runtime 本身可启动且 wiring 正确”，包括：
+
+- `node`、`npm`、`npx` 之间的同源关系正确
+- PATH/env 注入正确
+- wrapper / shim / entrypoint 解析正确
+- Windows 下 `.cmd` 或脚本入口可正常启动
+
+它不负责证明业务场景一定成功。例如：
+
+- `npx --version` 成功，不代表后续下载某个 MCP package 一定成功
+- `npm --version` 成功，不代表 `officecli` 安装一定成功
+
+后者应由 connection test、Office install test、集成测试分别验证。
 
 ### 下载/安装策略
 

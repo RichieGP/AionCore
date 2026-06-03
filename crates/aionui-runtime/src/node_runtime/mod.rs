@@ -58,6 +58,7 @@ pub async fn ensure_node_runtime_with_reporter(
 ) -> Result<ResolvedNodeRuntime, NodeRuntimeError> {
     match detect_system_runtime().await {
         Ok(runtime) => {
+            emit_runtime_ready(reporter, &runtime);
             log_runtime_selected(&runtime);
             Ok(runtime)
         }
@@ -163,6 +164,7 @@ async fn cached_managed_runtime(reporter: Option<&dyn NodeRuntimeProgressReporte
 
     match managed::validate_managed_runtime(&cached.root, reporter).await {
         Ok(runtime) => {
+            emit_runtime_ready(reporter, &runtime);
             *managed_runtime_cache().lock().await = Some(runtime.clone());
             Some(runtime)
         }
@@ -175,6 +177,16 @@ async fn cached_managed_runtime(reporter: Option<&dyn NodeRuntimeProgressReporte
             *managed_runtime_cache().lock().await = None;
             None
         }
+    }
+}
+
+fn emit_runtime_ready(reporter: Option<&dyn NodeRuntimeProgressReporter>, runtime: &ResolvedNodeRuntime) {
+    if let Some(reporter) = reporter {
+        reporter.report(NodeRuntimeProgress::ready(format!(
+            "{} Node runtime {} is ready",
+            runtime_source_label(runtime.source),
+            runtime.version
+        )));
     }
 }
 
@@ -466,5 +478,33 @@ mod tests {
             managed_runtime_cache().lock().await.is_none(),
             "stale managed runtime cache should be cleared"
         );
+    }
+
+    #[tokio::test]
+    async fn cached_managed_runtime_emits_ready_after_validation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("node-v24.11.0-test");
+        let runtime = fake_managed_runtime(&root);
+        *managed_runtime_cache().lock().await = Some(runtime.clone());
+
+        let phases = Arc::new(Mutex::new(Vec::<NodeRuntimeProgressPhase>::new()));
+        let reporter = {
+            let phases = Arc::clone(&phases);
+            move |update: NodeRuntimeProgress| {
+                phases.lock().expect("lock").push(update.phase);
+            }
+        };
+
+        let cached = cached_managed_runtime(Some(&reporter))
+            .await
+            .expect("cache should validate");
+
+        assert_eq!(cached.root, runtime.root);
+        assert_eq!(
+            *phases.lock().expect("lock"),
+            vec![NodeRuntimeProgressPhase::Validating, NodeRuntimeProgressPhase::Ready]
+        );
+
+        *managed_runtime_cache().lock().await = None;
     }
 }

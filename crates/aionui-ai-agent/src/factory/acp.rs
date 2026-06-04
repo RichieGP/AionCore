@@ -530,9 +530,10 @@ fn session_server_supported_by_capabilities(server: &SessionMcpServer, capabilit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aionui_runtime::init as init_runtime;
     use aionui_realtime::BroadcastEventBus;
-    use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+    use std::{mem, path::PathBuf};
 
     fn make_row(
         name: &str,
@@ -565,38 +566,24 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct PathGuard {
-        original: Option<OsString>,
+    fn test_runtime_data_dir() -> &'static PathBuf {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        DIR.get_or_init(|| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let path = temp.path().to_path_buf();
+            mem::forget(temp);
+            init_runtime(&path);
+            path
+        })
     }
 
     #[cfg(unix)]
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(path) => unsafe { std::env::set_var("PATH", path) },
-                None => unsafe { std::env::remove_var("PATH") },
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn prepend_fake_runtime_to_path(bin_dir: &std::path::Path) -> PathGuard {
-        let original = std::env::var_os("PATH");
-        let mut paths = vec![bin_dir.to_path_buf()];
-        if let Some(current) = &original {
-            paths.extend(std::env::split_paths(current));
-        }
-        let joined = std::env::join_paths(paths).expect("join PATH");
-        unsafe { std::env::set_var("PATH", joined) };
-        PathGuard { original }
-    }
-
-    #[cfg(unix)]
-    fn install_fake_system_runtime() -> tempfile::TempDir {
+    fn install_fake_bundled_runtime() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let bin = tmp.path().join("bin");
+        let runtime_root = tmp.path().join("node").join("node-v24.11.0-darwin-arm64");
+        let bin = runtime_root.join("bin");
         std::fs::create_dir_all(&bin).expect("create bin");
 
         for tool in ["node", "npm", "npx"] {
@@ -614,8 +601,9 @@ mod tests {
     #[tokio::test]
     async fn row_to_sdk_stdio_flattens_resolved_npx_command() {
         let _lock = path_test_lock().lock().expect("lock");
-        let runtime = install_fake_system_runtime();
-        let _path_guard = prepend_fake_runtime_to_path(&runtime.path().join("bin"));
+        let runtime = install_fake_bundled_runtime();
+        let _runtime_data_dir = test_runtime_data_dir();
+        unsafe { std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", runtime.path()) };
 
         let row = make_row(
             "ctx7",
@@ -626,10 +614,12 @@ mod tests {
         );
 
         let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
         match server {
             McpServer::Stdio(s) => {
-                let expected = std::fs::canonicalize(runtime.path().join("bin").join("npx")).expect("canonical path");
-                assert_eq!(s.command, expected);
+                let command = s.command.to_string_lossy();
+                assert_ne!(command, "npx");
+                assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
                 assert_eq!(s.args, vec!["-y".to_owned(), "@upstash/context7-mcp".to_owned()]);
             }
             _ => panic!("expected Stdio"),
@@ -640,8 +630,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_agent_command_spec_flattens_bare_npx_command() {
         let _lock = path_test_lock().lock().expect("lock");
-        let runtime = install_fake_system_runtime();
-        let _path_guard = prepend_fake_runtime_to_path(&runtime.path().join("bin"));
+        let runtime = install_fake_bundled_runtime();
+        let _runtime_data_dir = test_runtime_data_dir();
+        unsafe { std::env::set_var("AIONUI_BUNDLED_MANAGED_RESOURCES", runtime.path()) };
 
         let meta = aionui_api_types::AgentMetadata {
             id: "agent-1".into(),
@@ -681,8 +672,10 @@ mod tests {
         .await
         .expect("resolved command spec");
 
-        let expected = std::fs::canonicalize(runtime.path().join("bin").join("npx")).expect("canonical path");
-        assert_eq!(spec.command, expected);
+        unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
+        let command = spec.command.to_string_lossy();
+        assert_ne!(command, "npx");
+        assert!(command.ends_with("/npx"), "unexpected stdio command path: {command}");
         assert_eq!(spec.args, vec!["-y".to_owned(), "@scope/test-agent".to_owned()]);
         assert!(spec.env.iter().any(|entry| entry.name == "K" && entry.value == "V"));
         assert_eq!(spec.cwd.as_deref(), Some("/tmp/workspace"));

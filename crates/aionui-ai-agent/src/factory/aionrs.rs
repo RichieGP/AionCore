@@ -621,8 +621,8 @@ fn guide_mcp_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aionui_runtime::init as init_runtime;
     use aionui_realtime::BroadcastEventBus;
+    use aionui_runtime::init as init_runtime;
     use std::sync::{Mutex, OnceLock};
     use std::{mem, path::PathBuf};
 

@@ -25,8 +25,8 @@ use aionui_common::{
 use aionui_db::models::{ConversationRow, MessageRow};
 use aionui_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantPreferenceRepository,
-    IAssistantStateRepository, IConversationRepository, IMcpServerRepository, SaveRuntimeStateParams, SortOrder,
+    IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
+    IAssistantPreferenceRepository, IConversationRepository, IMcpServerRepository, SaveRuntimeStateParams, SortOrder,
 };
 use aionui_extension::AssistantRuleDispatcher;
 use aionui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
@@ -181,7 +181,7 @@ pub struct ConversationService {
     cron_service: Arc<RwLock<Option<Arc<dyn ICronService>>>>,
     mcp_server_repo: Arc<RwLock<Option<Arc<dyn IMcpServerRepository>>>>,
     assistant_definition_repo: Arc<RwLock<Option<Arc<dyn IAssistantDefinitionRepository>>>>,
-    assistant_state_repo: Arc<RwLock<Option<Arc<dyn IAssistantStateRepository>>>>,
+    assistant_state_repo: Arc<RwLock<Option<Arc<dyn IAssistantOverlayRepository>>>>,
     assistant_preference_repo: Arc<RwLock<Option<Arc<dyn IAssistantPreferenceRepository>>>>,
     assistant_dispatcher: Arc<RwLock<Option<Arc<dyn AssistantRuleDispatcher>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
@@ -248,7 +248,7 @@ impl ConversationService {
         }
     }
 
-    pub fn with_assistant_state_repo(&self, repo: Arc<dyn IAssistantStateRepository>) {
+    pub fn with_assistant_state_repo(&self, repo: Arc<dyn IAssistantOverlayRepository>) {
         if let Ok(mut guard) = self.assistant_state_repo.write() {
             *guard = Some(repo);
         }
@@ -318,7 +318,7 @@ impl ConversationService {
             .and_then(|guard| guard.as_ref().cloned())
     }
 
-    fn assistant_state_repo(&self) -> Option<Arc<dyn IAssistantStateRepository>> {
+    fn assistant_state_repo(&self) -> Option<Arc<dyn IAssistantOverlayRepository>> {
         self.assistant_state_repo
             .read()
             .ok()
@@ -874,7 +874,7 @@ impl ConversationService {
         };
 
         let Some(definition) = definition_repo
-            .get(assistant_id)
+            .get_by_key(assistant_id)
             .await
             .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))?
         else {
@@ -882,11 +882,11 @@ impl ConversationService {
         };
 
         let state = state_repo
-            .get(assistant_id)
+            .get(&definition.definition_id)
             .await
             .map_err(|e| ConversationError::internal(format!("assistant state lookup failed: {e}")))?;
         let preference = preference_repo
-            .get(assistant_id)
+            .get(&definition.definition_id)
             .await
             .map_err(|e| ConversationError::internal(format!("assistant preference lookup failed: {e}")))?;
 
@@ -923,6 +923,7 @@ impl ConversationService {
             None if definition.default_mcps_mode == "fixed" => {
                 parse_json_string_list(Some(definition.default_mcp_ids.as_str()), "default_mcp_ids")?
             }
+            None if definition.default_mcps_mode == "unset" => Vec::new(),
             None => preference
                 .as_ref()
                 .map(|row| parse_json_string_list(Some(row.last_mcp_ids.as_str()), "last_mcp_ids"))
@@ -935,14 +936,16 @@ impl ConversationService {
             .clone()
             .or_else(|| match definition.default_model_mode.as_str() {
                 "fixed" => definition.default_model_value.clone(),
-                _ => preference.as_ref().and_then(|row| row.last_model_id.clone()),
+                "auto" => preference.as_ref().and_then(|row| row.last_model_id.clone()),
+                _ => None,
             });
         let permission = overrides
             .permission
             .clone()
             .or_else(|| match definition.default_permission_mode.as_str() {
                 "fixed" => definition.default_permission_value.clone(),
-                _ => preference.as_ref().and_then(|row| row.last_permission_value.clone()),
+                "auto" => preference.as_ref().and_then(|row| row.last_permission_value.clone()),
+                _ => None,
             });
 
         let rules_content = if let Some(dispatcher) = self.assistant_dispatcher() {
@@ -967,7 +970,7 @@ impl ConversationService {
             assistant_id: assistant_id.to_owned(),
             assistant_source: definition.source,
             name: definition.name,
-            avatar: definition.avatar,
+            avatar: definition.avatar_value,
             agent_backend,
             rules: AssistantSnapshotRules {
                 content: if rules_content.is_empty() {
@@ -998,43 +1001,62 @@ impl ConversationService {
             return Ok(());
         };
         let Some(definition) = definition_repo
-            .get(assistant_id)
+            .get_by_key(assistant_id)
             .await
             .map_err(|e| ConversationError::internal(format!("assistant definition lookup failed: {e}")))?
         else {
             return Ok(());
         };
 
-        let last_model_id = (definition.default_model_mode == "auto")
-            .then_some(snapshot.resolved_defaults.model.as_deref())
-            .flatten();
-        let last_permission_value = (definition.default_permission_mode == "auto")
-            .then_some(snapshot.resolved_defaults.permission.as_deref())
-            .flatten();
+        let existing_preference = preference_repo
+            .get(&definition.definition_id)
+            .await
+            .map_err(|e| ConversationError::internal(format!("assistant preference lookup failed: {e}")))?;
+        let last_model_id = if definition.default_model_mode == "auto" {
+            snapshot.resolved_defaults.model.clone()
+        } else {
+            existing_preference.as_ref().and_then(|row| row.last_model_id.clone())
+        };
+        let last_permission_value = if definition.default_permission_mode == "auto" {
+            snapshot.resolved_defaults.permission.clone()
+        } else {
+            existing_preference
+                .as_ref()
+                .and_then(|row| row.last_permission_value.clone())
+        };
         let last_skill_ids = if definition.default_skills_mode == "auto" {
             serde_json::to_string(&snapshot.resolved_defaults.skill_ids)
                 .map_err(|e| ConversationError::internal(format!("encode assistant skills: {e}")))?
         } else {
-            definition.default_skill_ids.clone()
+            existing_preference
+                .as_ref()
+                .map(|row| row.last_skill_ids.clone())
+                .unwrap_or_else(|| "[]".to_string())
         };
         let last_disabled_builtin_skill_ids = if definition.default_skills_mode == "auto" {
             serde_json::to_string(&snapshot.resolved_defaults.disabled_builtin_skill_ids)
                 .map_err(|e| ConversationError::internal(format!("encode assistant disabled builtin skills: {e}")))?
         } else {
-            definition.default_disabled_builtin_skill_ids.clone()
+            existing_preference
+                .as_ref()
+                .map(|row| row.last_disabled_builtin_skill_ids.clone())
+                .unwrap_or_else(|| "[]".to_string())
         };
         let last_mcp_ids = if definition.default_mcps_mode == "auto" {
             serde_json::to_string(&snapshot.resolved_defaults.mcp_ids)
                 .map_err(|e| ConversationError::internal(format!("encode assistant mcps: {e}")))?
         } else {
-            definition.default_mcp_ids.clone()
+            existing_preference
+                .as_ref()
+                .map(|row| row.last_mcp_ids.clone())
+                .unwrap_or_else(|| "[]".to_string())
         };
 
         preference_repo
             .upsert(&aionui_db::UpsertAssistantPreferenceParams {
-                assistant_id,
-                last_model_id,
-                last_permission_value,
+                definition_id: &definition.definition_id,
+                last_model_id: last_model_id.as_deref(),
+                last_permission_value: last_permission_value.as_deref(),
                 last_skill_ids: &last_skill_ids,
                 last_disabled_builtin_skill_ids: &last_disabled_builtin_skill_ids,
                 last_mcp_ids: &last_mcp_ids,

@@ -30,8 +30,8 @@ mod user;
 pub use acp_session::{CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams};
 pub use agent_metadata::IAgentMetadataRepository;
 pub use assistant::{
-    IAssistantDefinitionRepository, IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository,
-    IAssistantStateRepository,
+    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantOverrideRepository,
+    IAssistantPreferenceRepository, IAssistantRepository,
 };
 pub use channel::IChannelRepository;
 pub use client_preference::IClientPreferenceRepository;
@@ -45,8 +45,8 @@ pub use settings::ISettingsRepository;
 pub use sqlite_acp_session::SqliteAcpSessionRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
 pub use sqlite_assistant::{
-    SqliteAssistantDefinitionRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
-    SqliteAssistantRepository, SqliteAssistantStateRepository, rebuild_legacy_assistant_mirror,
+    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository,
+    SqliteAssistantPreferenceRepository, SqliteAssistantRepository, rebuild_legacy_assistant_mirror,
 };
 pub use sqlite_channel::SqliteChannelRepository;
 pub use sqlite_client_preference::SqliteClientPreferenceRepository;

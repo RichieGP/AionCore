@@ -3,9 +3,9 @@
 mod common;
 
 use aionui_db::{
-    IAssistantDefinitionRepository, IAssistantPreferenceRepository, IAssistantStateRepository,
-    SqliteAssistantDefinitionRepository, SqliteAssistantPreferenceRepository, SqliteAssistantStateRepository,
-    UpsertAssistantDefinitionParams, UpsertAssistantPreferenceParams, UpsertAssistantStateParams,
+    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantPreferenceRepository,
+    SqliteAssistantDefinitionRepository, SqliteAssistantOverlayRepository, SqliteAssistantPreferenceRepository,
+    UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams, UpsertAssistantPreferenceParams,
 };
 use axum::http::StatusCode;
 use serde_json::json;
@@ -143,13 +143,14 @@ async fn t1_3b_create_persists_assistant_snapshot_and_updates_preferences() {
 
     let pool = services.database.pool().clone();
     let definition_repo = SqliteAssistantDefinitionRepository::new(pool.clone());
-    let state_repo = SqliteAssistantStateRepository::new(pool.clone());
+    let state_repo = SqliteAssistantOverlayRepository::new(pool.clone());
     let preference_repo = SqliteAssistantPreferenceRepository::new(pool);
-    let definition = definition_repo.get("u1").await.unwrap().unwrap();
+    let definition = definition_repo.get_by_key("u1").await.unwrap().unwrap();
 
     definition_repo
         .upsert(&UpsertAssistantDefinitionParams {
-            id: &definition.id,
+            definition_id: &definition.definition_id,
+            assistant_key: &definition.assistant_key,
             source: &definition.source,
             owner_type: &definition.owner_type,
             source_ref: definition.source_ref.as_deref(),
@@ -159,7 +160,8 @@ async fn t1_3b_create_persists_assistant_snapshot_and_updates_preferences() {
             name_i18n: &definition.name_i18n,
             description: definition.description.as_deref(),
             description_i18n: &definition.description_i18n,
-            avatar: definition.avatar.as_deref(),
+            avatar_type: &definition.avatar_type,
+            avatar_value: definition.avatar_value.as_deref(),
             agent_backend: &definition.agent_backend,
             rule_resource_type: &definition.rule_resource_type,
             rule_resource_ref: definition.rule_resource_ref.as_deref(),
@@ -180,8 +182,8 @@ async fn t1_3b_create_persists_assistant_snapshot_and_updates_preferences() {
         .await
         .unwrap();
     state_repo
-        .upsert(&UpsertAssistantStateParams {
-            assistant_id: "u1",
+        .upsert(&UpsertAssistantOverlayParams {
+            definition_id: &definition.definition_id,
             enabled: true,
             sort_order: 0,
             agent_backend_override: Some("codex"),
@@ -191,7 +193,7 @@ async fn t1_3b_create_persists_assistant_snapshot_and_updates_preferences() {
         .unwrap();
     preference_repo
         .upsert(&UpsertAssistantPreferenceParams {
-            assistant_id: "u1",
+            definition_id: &definition.definition_id,
             last_model_id: Some("pref-model"),
             last_permission_value: Some("workspace-write"),
             last_skill_ids: r#"["pref-skill"]"#,
@@ -256,7 +258,7 @@ async fn t1_3b_create_persists_assistant_snapshot_and_updates_preferences() {
             .any(|skill| skill == "override-skill")
     );
 
-    let updated_preference = preference_repo.get("u1").await.unwrap().unwrap();
+    let updated_preference = preference_repo.get(&definition.definition_id).await.unwrap().unwrap();
     assert_eq!(updated_preference.last_model_id.as_deref(), Some("override-model"));
     assert_eq!(
         updated_preference.last_permission_value.as_deref(),

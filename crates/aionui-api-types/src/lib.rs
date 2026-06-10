@@ -48,11 +48,11 @@ pub use agent_error::{
 };
 pub use assistant::{
     AssistantCapabilitiesResponse, AssistantDefaultListRequest, AssistantDefaultListResponse,
-    AssistantDefaultScalarRequest, AssistantDefaultScalarResponse, AssistantDefaultsRequest,
-    AssistantDefaultsResponse, AssistantDetailResponse, AssistantEngineResponse, AssistantPreferencesResponse,
-    AssistantProfileResponse, AssistantPromptsResponse, AssistantResponse, AssistantRulesResponse, AssistantSource,
-    AssistantStateResponse, CreateAssistantRequest, ImportAssistantsRequest, ImportAssistantsResult, ImportError,
-    SetAssistantStateRequest, UpdateAssistantRequest,
+    AssistantDefaultScalarRequest, AssistantDefaultScalarResponse, AssistantDefaultsRequest, AssistantDefaultsResponse,
+    AssistantDetailResponse, AssistantEngineResponse, AssistantPreferencesResponse, AssistantProfileResponse,
+    AssistantPromptsResponse, AssistantResponse, AssistantRulesResponse, AssistantSource, AssistantStateResponse,
+    CreateAssistantRequest, ImportAssistantsRequest, ImportAssistantsResult, ImportError, SetAssistantStateRequest,
+    UpdateAssistantRequest,
 };
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser, QrLoginRequest,

@@ -13,11 +13,11 @@ use aionui_channel::ChannelRouterState;
 use aionui_conversation::{ConversationRouterState, ConversationService};
 use aionui_cron::{CronEventEmitter, CronRouterState};
 use aionui_db::{
-    IAcpSessionRepository, IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverrideRepository,
-    IAssistantPreferenceRepository, IAssistantRepository, IAssistantStateRepository, IProviderRepository,
+    IAcpSessionRepository, IAgentMetadataRepository, IAssistantDefinitionRepository, IAssistantOverlayRepository,
+    IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository, IProviderRepository,
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository, SqliteAssistantRepository,
-    SqliteAssistantStateRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
+    SqliteAssistantRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
     SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
 };
 use aionui_extension::{
@@ -289,7 +289,8 @@ pub fn build_assistant_state(services: &AppServices, extension_registry: Extensi
     let pool = services.database.pool().clone();
     let definition_repo: Arc<dyn IAssistantDefinitionRepository> =
         Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let state_repo: Arc<dyn IAssistantStateRepository> = Arc::new(SqliteAssistantStateRepository::new(pool.clone()));
+    let state_repo: Arc<dyn IAssistantOverlayRepository> =
+        Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
     let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
         Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
     let repo: Arc<dyn IAssistantRepository> = Arc::new(SqliteAssistantRepository::new(pool.clone()));
@@ -367,7 +368,7 @@ pub fn build_conversation_state(
     )));
     conversation_service
         .with_assistant_definition_repo(Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone())));
-    conversation_service.with_assistant_state_repo(Arc::new(SqliteAssistantStateRepository::new(pool.clone())));
+    conversation_service.with_assistant_state_repo(Arc::new(SqliteAssistantOverlayRepository::new(pool.clone())));
     conversation_service
         .with_assistant_preference_repo(Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone())));
     if let Some(dispatcher) = assistant_dispatcher {

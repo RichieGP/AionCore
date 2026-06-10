@@ -16,11 +16,11 @@ use std::sync::Arc;
 use aionui_app::{AppConfig, AppServices, ModuleStates, build_module_states, create_router_with_states};
 use aionui_assistant::{AssistantRouterState, AssistantService, BuiltinAssistantRegistry};
 use aionui_db::{
-    IAssistantDefinitionRepository, IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository,
-    IAssistantStateRepository, IProviderRepository, SqliteAssistantDefinitionRepository,
-    SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository, SqliteAssistantRepository,
-    SqliteAssistantStateRepository, SqliteProviderRepository, UpsertAssistantDefinitionParams,
-    UpsertAssistantPreferenceParams, UpsertAssistantStateParams, init_database_memory,
+    IAssistantDefinitionRepository, IAssistantOverlayRepository, IAssistantOverrideRepository,
+    IAssistantPreferenceRepository, IAssistantRepository, IProviderRepository, SqliteAssistantDefinitionRepository,
+    SqliteAssistantOverlayRepository, SqliteAssistantOverrideRepository, SqliteAssistantPreferenceRepository,
+    SqliteAssistantRepository, SqliteProviderRepository, UpsertAssistantDefinitionParams, UpsertAssistantOverlayParams,
+    UpsertAssistantPreferenceParams, init_database_memory,
 };
 use aionui_extension::{
     AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionSource, ExtensionStateStore,
@@ -134,7 +134,7 @@ async fn fixture() -> Fixture {
     let (mut states, _): (ModuleStates, _) = build_module_states(&services).await.expect("build module states");
     for table in [
         "assistant_preferences",
-        "assistant_states",
+        "assistant_overlays",
         "assistant_definitions",
         "assistant_overrides",
         "assistants",
@@ -195,7 +195,8 @@ async fn fixture() -> Fixture {
     let pool = services.database.pool().clone();
     let definition_repo: Arc<dyn IAssistantDefinitionRepository> =
         Arc::new(SqliteAssistantDefinitionRepository::new(pool.clone()));
-    let state_repo: Arc<dyn IAssistantStateRepository> = Arc::new(SqliteAssistantStateRepository::new(pool.clone()));
+    let state_repo: Arc<dyn IAssistantOverlayRepository> =
+        Arc::new(SqliteAssistantOverlayRepository::new(pool.clone()));
     let preference_repo: Arc<dyn IAssistantPreferenceRepository> =
         Arc::new(SqliteAssistantPreferenceRepository::new(pool.clone()));
     let repo: Arc<dyn IAssistantRepository> = Arc::new(SqliteAssistantRepository::new(pool.clone()));
@@ -340,13 +341,14 @@ async fn get_detail_returns_definition_state_preferences_and_rules() {
 
     let pool = fx.services.database.pool().clone();
     let definition_repo = SqliteAssistantDefinitionRepository::new(pool.clone());
-    let state_repo = SqliteAssistantStateRepository::new(pool.clone());
+    let state_repo = SqliteAssistantOverlayRepository::new(pool.clone());
     let preference_repo = SqliteAssistantPreferenceRepository::new(pool);
-    let definition = definition_repo.get("u1").await.unwrap().unwrap();
+    let definition = definition_repo.get_by_key("u1").await.unwrap().unwrap();
 
     definition_repo
         .upsert(&UpsertAssistantDefinitionParams {
-            id: &definition.id,
+            definition_id: &definition.definition_id,
+            assistant_key: &definition.assistant_key,
             source: &definition.source,
             owner_type: &definition.owner_type,
             source_ref: definition.source_ref.as_deref(),
@@ -356,7 +358,8 @@ async fn get_detail_returns_definition_state_preferences_and_rules() {
             name_i18n: &definition.name_i18n,
             description: definition.description.as_deref(),
             description_i18n: &definition.description_i18n,
-            avatar: definition.avatar.as_deref(),
+            avatar_type: &definition.avatar_type,
+            avatar_value: definition.avatar_value.as_deref(),
             agent_backend: &definition.agent_backend,
             rule_resource_type: &definition.rule_resource_type,
             rule_resource_ref: definition.rule_resource_ref.as_deref(),
@@ -377,8 +380,8 @@ async fn get_detail_returns_definition_state_preferences_and_rules() {
         .await
         .unwrap();
     state_repo
-        .upsert(&UpsertAssistantStateParams {
-            assistant_id: "u1",
+        .upsert(&UpsertAssistantOverlayParams {
+            definition_id: &definition.definition_id,
             enabled: false,
             sort_order: 7,
             agent_backend_override: Some("codex"),
@@ -388,7 +391,7 @@ async fn get_detail_returns_definition_state_preferences_and_rules() {
         .unwrap();
     preference_repo
         .upsert(&UpsertAssistantPreferenceParams {
-            assistant_id: "u1",
+            definition_id: &definition.definition_id,
             last_model_id: Some("gpt-5-mini"),
             last_permission_value: Some("workspace-write"),
             last_skill_ids: r#"["pref-skill"]"#,

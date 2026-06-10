@@ -2,14 +2,15 @@
 --
 -- Introduces the new assistant runtime storage:
 --   - assistant_definitions
---   - assistant_states
+--   - assistant_overlays
 --   - assistant_preferences
 --
 -- Legacy tables `assistants` and `assistant_overrides` are intentionally kept
 -- for downgrade compatibility and mirror projection.
 
 CREATE TABLE IF NOT EXISTS assistant_definitions (
-    id                                 TEXT PRIMARY KEY,
+    definition_id                      TEXT PRIMARY KEY,
+    assistant_key                      TEXT    NOT NULL,
     source                             TEXT    NOT NULL
                                                CHECK (source IN ('builtin', 'user', 'generated', 'extension')),
     owner_type                         TEXT    NOT NULL
@@ -21,7 +22,9 @@ CREATE TABLE IF NOT EXISTS assistant_definitions (
     name_i18n                          TEXT    NOT NULL DEFAULT '{}',
     description                        TEXT,
     description_i18n                   TEXT    NOT NULL DEFAULT '{}',
-    avatar                             TEXT,
+    avatar_type                        TEXT    NOT NULL DEFAULT 'none'
+                                               CHECK (avatar_type IN ('none', 'emoji', 'builtin_asset', 'user_asset')),
+    avatar_value                       TEXT,
     agent_backend                      TEXT    NOT NULL,
     rule_resource_type                 TEXT    NOT NULL
                                                CHECK (
@@ -38,10 +41,10 @@ CREATE TABLE IF NOT EXISTS assistant_definitions (
     recommended_prompts                TEXT    NOT NULL DEFAULT '[]',
     recommended_prompts_i18n           TEXT    NOT NULL DEFAULT '{}',
     default_model_mode                 TEXT    NOT NULL
-                                               CHECK (default_model_mode IN ('auto', 'fixed')),
+                                               CHECK (default_model_mode IN ('unset', 'auto', 'fixed')),
     default_model_value                TEXT,
     default_permission_mode            TEXT    NOT NULL
-                                               CHECK (default_permission_mode IN ('auto', 'fixed')),
+                                               CHECK (default_permission_mode IN ('unset', 'auto', 'fixed')),
     default_permission_value           TEXT,
     default_skills_mode                TEXT    NOT NULL
                                                CHECK (default_skills_mode IN ('auto', 'fixed')),
@@ -49,7 +52,7 @@ CREATE TABLE IF NOT EXISTS assistant_definitions (
     custom_skill_names                 TEXT    NOT NULL DEFAULT '[]',
     default_disabled_builtin_skill_ids TEXT    NOT NULL DEFAULT '[]',
     default_mcps_mode                  TEXT    NOT NULL
-                                               CHECK (default_mcps_mode IN ('auto', 'fixed')),
+                                               CHECK (default_mcps_mode IN ('unset', 'auto', 'fixed')),
     default_mcp_ids                    TEXT    NOT NULL DEFAULT '[]',
     created_at                         INTEGER NOT NULL,
     updated_at                         INTEGER NOT NULL,
@@ -60,31 +63,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_definitions_source_ref
     ON assistant_definitions(source, source_ref)
     WHERE source_ref IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_definitions_assistant_key
+    ON assistant_definitions(assistant_key);
+
 CREATE INDEX IF NOT EXISTS idx_assistant_definitions_source
     ON assistant_definitions(source);
 
 CREATE INDEX IF NOT EXISTS idx_assistant_definitions_agent_backend
     ON assistant_definitions(agent_backend);
 
-CREATE TABLE IF NOT EXISTS assistant_states (
-    assistant_id  TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS assistant_overlays (
+    definition_id TEXT PRIMARY KEY,
     enabled       INTEGER NOT NULL DEFAULT 1,
     sort_order    INTEGER NOT NULL DEFAULT 0,
     agent_backend_override TEXT,
     last_used_at  INTEGER,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL,
-    FOREIGN KEY (assistant_id) REFERENCES assistant_definitions(id) ON DELETE CASCADE
+    FOREIGN KEY (definition_id) REFERENCES assistant_definitions(definition_id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_assistant_states_enabled
-    ON assistant_states(enabled);
+CREATE INDEX IF NOT EXISTS idx_assistant_overlays_enabled
+    ON assistant_overlays(enabled);
 
-CREATE INDEX IF NOT EXISTS idx_assistant_states_sort_order
-    ON assistant_states(sort_order);
+CREATE INDEX IF NOT EXISTS idx_assistant_overlays_sort_order
+    ON assistant_overlays(sort_order);
 
 CREATE TABLE IF NOT EXISTS assistant_preferences (
-    assistant_id                       TEXT PRIMARY KEY,
+    definition_id                      TEXT PRIMARY KEY,
     last_model_id                      TEXT,
     last_permission_value              TEXT,
     last_skill_ids                     TEXT    NOT NULL DEFAULT '[]',
@@ -92,5 +98,5 @@ CREATE TABLE IF NOT EXISTS assistant_preferences (
     last_mcp_ids                       TEXT    NOT NULL DEFAULT '[]',
     created_at                         INTEGER NOT NULL,
     updated_at                         INTEGER NOT NULL,
-    FOREIGN KEY (assistant_id) REFERENCES assistant_definitions(id) ON DELETE CASCADE
+    FOREIGN KEY (definition_id) REFERENCES assistant_definitions(definition_id) ON DELETE CASCADE
 );

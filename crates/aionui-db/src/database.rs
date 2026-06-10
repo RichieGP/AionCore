@@ -7,7 +7,7 @@ use fs2::FileExt;
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
-use sqlx::{Sqlite, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use tracing::{info, warn};
 
 use crate::error::DbError;
@@ -29,6 +29,7 @@ static DB_MIGRATOR: Migrator = sqlx::migrate!();
 // Historical special-case for the MCP schema reconciliation fallback.
 // Keep this pinned to migration version 7 even as newer migrations land.
 const MCP_SCHEMA_RECONCILIATION_MIGRATION_VERSION: i64 = 7;
+const ASSISTANT_SCHEMA_RECONCILIATION_MIGRATION_VERSION: i64 = 12;
 
 /// Wraps a SQLite connection pool with lifecycle management.
 #[derive(Clone, Debug)]
@@ -370,6 +371,21 @@ async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<
                 )))
             }
         }
+        Err(sqlx::migrate::MigrateError::VersionMismatch(version))
+            if version == ASSISTANT_SCHEMA_RECONCILIATION_MIGRATION_VERSION =>
+        {
+            if align_reconciled_assistant_migration_checksum(&mut *conn).await? {
+                warn!(
+                    "Aligned checksum for reconciled assistant migration {}; retrying",
+                    ASSISTANT_SCHEMA_RECONCILIATION_MIGRATION_VERSION
+                );
+                DB_MIGRATOR.run(&mut *conn).await.map_err(DbError::Migration)
+            } else {
+                Err(DbError::Migration(sqlx::migrate::MigrateError::VersionMismatch(
+                    version,
+                )))
+            }
+        }
         Err(e) => Err(DbError::Migration(e)),
     }
 }
@@ -424,6 +440,7 @@ impl Drop for MigrateLockGuard {
 /// safely adds any missing columns via `ALTER TABLE ADD COLUMN`.
 async fn ensure_schema_columns(pool: &SqlitePool) -> Result<(), DbError> {
     reconcile_mcp_server_schema(pool).await?;
+    reconcile_assistant_unification_schema(pool).await?;
 
     let expected: &[(&str, &str, &str)] = &[
         ("cron_jobs", "skill_content", "TEXT"),
@@ -458,6 +475,28 @@ async fn ensure_schema_columns(pool: &SqlitePool) -> Result<(), DbError> {
             info!("Added missing column {table}.{column}");
         }
     }
+    Ok(())
+}
+
+async fn reconcile_assistant_unification_schema(pool: &SqlitePool) -> Result<(), DbError> {
+    let table_exists: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='assistant_definitions'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(DbError::Query)?;
+    if !table_exists {
+        return Ok(());
+    }
+
+    let final_shape = assistant_unification_schema_is_final(pool).await?;
+    if final_shape {
+        return Ok(());
+    }
+
+    rebuild_legacy_assistant_unification_schema(pool).await?;
+    info!("Rebuilt assistant unification tables into final identity schema");
+
     Ok(())
 }
 
@@ -611,6 +650,591 @@ async fn align_reconciled_mcp_migration_checksum(conn: &mut sqlx::SqliteConnecti
         .map_err(DbError::Query)?;
 
     Ok(updated.rows_affected() > 0)
+}
+
+async fn align_reconciled_assistant_migration_checksum(conn: &mut sqlx::SqliteConnection) -> Result<bool, DbError> {
+    if !assistant_unification_schema_is_final_conn(conn).await? {
+        return Ok(false);
+    }
+
+    let Some(migration) = DB_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == ASSISTANT_SCHEMA_RECONCILIATION_MIGRATION_VERSION)
+    else {
+        return Ok(false);
+    };
+
+    let updated = sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+        .bind(&*migration.checksum)
+        .bind(ASSISTANT_SCHEMA_RECONCILIATION_MIGRATION_VERSION)
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::Query)?;
+
+    Ok(updated.rows_affected() > 0)
+}
+
+async fn assistant_unification_schema_is_final(pool: &SqlitePool) -> Result<bool, DbError> {
+    let has_definition_id = table_has_column(pool, "assistant_definitions", "definition_id").await?;
+    let has_assistant_key = table_has_column(pool, "assistant_definitions", "assistant_key").await?;
+    let has_avatar_type = table_has_column(pool, "assistant_definitions", "avatar_type").await?;
+    let has_avatar_value = table_has_column(pool, "assistant_definitions", "avatar_value").await?;
+    let state_uses_definition_id = table_has_column(pool, "assistant_overlays", "definition_id").await?;
+    let preference_uses_definition_id = table_has_column(pool, "assistant_preferences", "definition_id").await?;
+    let scalar_default_modes_support_unset = assistant_definition_scalar_default_modes_support_unset(pool).await?;
+
+    Ok(has_definition_id
+        && has_assistant_key
+        && has_avatar_type
+        && has_avatar_value
+        && state_uses_definition_id
+        && preference_uses_definition_id
+        && scalar_default_modes_support_unset)
+}
+
+async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool, DbError> {
+    sqlx::query_scalar("SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::Query)
+}
+
+async fn table_has_column(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, DbError> {
+    sqlx::query_scalar("SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map_err(DbError::Query)
+}
+
+async fn assistant_unification_schema_is_final_conn(conn: &mut sqlx::SqliteConnection) -> Result<bool, DbError> {
+    let has_definition_id = table_has_column_conn(conn, "assistant_definitions", "definition_id").await?;
+    let has_assistant_key = table_has_column_conn(conn, "assistant_definitions", "assistant_key").await?;
+    let has_avatar_type = table_has_column_conn(conn, "assistant_definitions", "avatar_type").await?;
+    let has_avatar_value = table_has_column_conn(conn, "assistant_definitions", "avatar_value").await?;
+    let state_uses_definition_id = table_has_column_conn(conn, "assistant_overlays", "definition_id").await?;
+    let preference_uses_definition_id = table_has_column_conn(conn, "assistant_preferences", "definition_id").await?;
+    let scalar_default_modes_support_unset = assistant_definition_scalar_default_modes_support_unset_conn(conn).await?;
+
+    Ok(has_definition_id
+        && has_assistant_key
+        && has_avatar_type
+        && has_avatar_value
+        && state_uses_definition_id
+        && preference_uses_definition_id
+        && scalar_default_modes_support_unset)
+}
+
+async fn table_has_column_conn(conn: &mut sqlx::SqliteConnection, table: &str, column: &str) -> Result<bool, DbError> {
+    sqlx::query_scalar("SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name = ?")
+        .bind(table)
+        .bind(column)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::Query)
+}
+
+async fn assistant_definition_scalar_default_modes_support_unset(pool: &SqlitePool) -> Result<bool, DbError> {
+    let table_sql: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistant_definitions'")
+            .fetch_one(pool)
+            .await
+            .map_err(DbError::Query)?;
+    Ok(table_sql
+        .as_deref()
+        .map(assistant_definition_sql_supports_unset_defaults)
+        .unwrap_or(false))
+}
+
+async fn assistant_definition_scalar_default_modes_support_unset_conn(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<bool, DbError> {
+    let table_sql: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistant_definitions'")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(DbError::Query)?;
+    Ok(table_sql
+        .as_deref()
+        .map(assistant_definition_sql_supports_unset_defaults)
+        .unwrap_or(false))
+}
+
+fn assistant_definition_sql_supports_unset_defaults(table_sql: &str) -> bool {
+    let normalized = table_sql.to_ascii_lowercase().replace(char::is_whitespace, "");
+    normalized.contains("default_model_mode")
+        && normalized.contains("default_permission_mode")
+        && normalized.contains("default_mcps_mode")
+        && normalized.contains("('unset','auto','fixed')")
+}
+
+async fn rebuild_legacy_assistant_unification_schema(pool: &SqlitePool) -> Result<(), DbError> {
+    let overlay_table = if table_exists(pool, "assistant_overlays").await? {
+        "assistant_overlays"
+    } else if table_exists(pool, "assistant_states").await? {
+        "assistant_states"
+    } else {
+        return Err(DbError::Init(
+            "assistant schema repair failed: neither assistant_overlays nor assistant_states exists".into(),
+        ));
+    };
+    let definitions_use_internal_identity = table_has_column(pool, "assistant_definitions", "definition_id").await?;
+    let overlays_use_definition_id = table_has_column(pool, overlay_table, "definition_id").await?;
+    let preferences_use_definition_id = table_has_column(pool, "assistant_preferences", "definition_id").await?;
+
+    let definition_rows = if definitions_use_internal_identity {
+        sqlx::query(
+            "SELECT definition_id, assistant_key, source, owner_type, source_ref, source_version, source_hash,
+                name, name_i18n, description, description_i18n, avatar_type, avatar_value,
+                agent_backend, rule_resource_type, rule_resource_ref, rule_inline_content,
+                recommended_prompts, recommended_prompts_i18n,
+                default_model_mode, default_model_value,
+                default_permission_mode, default_permission_value,
+                default_skills_mode, default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+                default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+         FROM assistant_definitions",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::Query)?
+    } else {
+        sqlx::query(
+            "SELECT id, source, owner_type, source_ref, source_version, source_hash,
+                name, name_i18n, description, description_i18n, avatar,
+                agent_backend, rule_resource_type, rule_resource_ref, rule_inline_content,
+                recommended_prompts, recommended_prompts_i18n,
+                default_model_mode, default_model_value,
+                default_permission_mode, default_permission_value,
+                default_skills_mode, default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+                default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+         FROM assistant_definitions",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::Query)?
+    };
+
+    let state_rows = sqlx::query(&format!(
+        "SELECT {} AS overlay_key, enabled, sort_order, agent_backend_override, last_used_at, created_at, updated_at
+         FROM {overlay_table}",
+        if overlays_use_definition_id {
+            "definition_id"
+        } else {
+            "assistant_id"
+        }
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(DbError::Query)?;
+
+    let preference_rows = sqlx::query(&format!(
+        "SELECT {} AS preference_key, last_model_id, last_permission_value, last_skill_ids,
+                last_disabled_builtin_skill_ids, last_mcp_ids, created_at, updated_at
+         FROM assistant_preferences",
+        if preferences_use_definition_id {
+            "definition_id"
+        } else {
+            "assistant_id"
+        }
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(DbError::Query)?;
+
+    let mut definition_id_map = std::collections::HashMap::new();
+    let mut definitions = Vec::with_capacity(definition_rows.len());
+    for row in definition_rows {
+        if definitions_use_internal_identity {
+            let definition_id: String = row.get("definition_id");
+            let assistant_key: String = row.get("assistant_key");
+            definition_id_map.insert(assistant_key.clone(), definition_id.clone());
+            definitions.push((
+                definition_id,
+                assistant_key,
+                row.get::<String, _>("source"),
+                row.get::<String, _>("owner_type"),
+                row.get::<Option<String>, _>("source_ref"),
+                row.get::<Option<String>, _>("source_version"),
+                row.get::<Option<String>, _>("source_hash"),
+                row.get::<String, _>("name"),
+                row.get::<String, _>("name_i18n"),
+                row.get::<Option<String>, _>("description"),
+                row.get::<String, _>("description_i18n"),
+                row.get::<String, _>("avatar_type"),
+                row.get::<Option<String>, _>("avatar_value"),
+                row.get::<String, _>("agent_backend"),
+                row.get::<String, _>("rule_resource_type"),
+                row.get::<Option<String>, _>("rule_resource_ref"),
+                row.get::<Option<String>, _>("rule_inline_content"),
+                row.get::<String, _>("recommended_prompts"),
+                row.get::<String, _>("recommended_prompts_i18n"),
+                row.get::<String, _>("default_model_mode"),
+                row.get::<Option<String>, _>("default_model_value"),
+                row.get::<String, _>("default_permission_mode"),
+                row.get::<Option<String>, _>("default_permission_value"),
+                row.get::<String, _>("default_skills_mode"),
+                row.get::<String, _>("default_skill_ids"),
+                row.get::<String, _>("custom_skill_names"),
+                row.get::<String, _>("default_disabled_builtin_skill_ids"),
+                row.get::<String, _>("default_mcps_mode"),
+                row.get::<String, _>("default_mcp_ids"),
+                row.get::<i64, _>("created_at"),
+                row.get::<i64, _>("updated_at"),
+                row.get::<Option<i64>, _>("deleted_at"),
+            ));
+        } else {
+            let assistant_key: String = row.get("id");
+            let source: String = row.get("source");
+            let avatar: Option<String> = row.get("avatar");
+            let definition_id = aionui_common::generate_prefixed_id("asstdef");
+            let (avatar_type, avatar_value) = infer_avatar_storage(&source, avatar.as_deref());
+            definition_id_map.insert(assistant_key.clone(), definition_id.clone());
+            definitions.push((
+                definition_id,
+                assistant_key,
+                source,
+                row.get::<String, _>("owner_type"),
+                row.get::<Option<String>, _>("source_ref"),
+                row.get::<Option<String>, _>("source_version"),
+                row.get::<Option<String>, _>("source_hash"),
+                row.get::<String, _>("name"),
+                row.get::<String, _>("name_i18n"),
+                row.get::<Option<String>, _>("description"),
+                row.get::<String, _>("description_i18n"),
+                avatar_type,
+                avatar_value,
+                row.get::<String, _>("agent_backend"),
+                row.get::<String, _>("rule_resource_type"),
+                row.get::<Option<String>, _>("rule_resource_ref"),
+                row.get::<Option<String>, _>("rule_inline_content"),
+                row.get::<String, _>("recommended_prompts"),
+                row.get::<String, _>("recommended_prompts_i18n"),
+                row.get::<String, _>("default_model_mode"),
+                row.get::<Option<String>, _>("default_model_value"),
+                row.get::<String, _>("default_permission_mode"),
+                row.get::<Option<String>, _>("default_permission_value"),
+                row.get::<String, _>("default_skills_mode"),
+                row.get::<String, _>("default_skill_ids"),
+                row.get::<String, _>("custom_skill_names"),
+                row.get::<String, _>("default_disabled_builtin_skill_ids"),
+                row.get::<String, _>("default_mcps_mode"),
+                row.get::<String, _>("default_mcp_ids"),
+                row.get::<i64, _>("created_at"),
+                row.get::<i64, _>("updated_at"),
+                row.get::<Option<i64>, _>("deleted_at"),
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await.map_err(DbError::Query)?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+
+    for table in [
+        "_assistant_definitions_legacy_v12",
+        "_assistant_overlays_legacy_v12",
+        "_assistant_preferences_legacy_v12",
+    ] {
+        sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+    }
+
+    sqlx::query("ALTER TABLE assistant_definitions RENAME TO _assistant_definitions_legacy_v12")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    sqlx::query(&format!(
+        "ALTER TABLE {overlay_table} RENAME TO _assistant_overlays_legacy_v12"
+    ))
+    .execute(&mut *tx)
+    .await
+    .map_err(DbError::Query)?;
+    sqlx::query("ALTER TABLE assistant_preferences RENAME TO _assistant_preferences_legacy_v12")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+
+    for index in [
+        "idx_assistant_definitions_source_ref",
+        "idx_assistant_definitions_assistant_key",
+        "idx_assistant_definitions_source",
+        "idx_assistant_definitions_agent_backend",
+        "idx_assistant_states_enabled",
+        "idx_assistant_states_sort_order",
+        "idx_assistant_overlays_enabled",
+        "idx_assistant_overlays_sort_order",
+    ] {
+        sqlx::query(&format!("DROP INDEX IF EXISTS {index}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+    }
+
+    create_final_assistant_unification_tables(&mut tx).await?;
+
+    for row in &definitions {
+        sqlx::query(
+            "INSERT INTO assistant_definitions (
+                definition_id, assistant_key, source, owner_type, source_ref, source_version, source_hash,
+                name, name_i18n, description, description_i18n, avatar_type, avatar_value,
+                agent_backend, rule_resource_type, rule_resource_ref, rule_inline_content,
+                recommended_prompts, recommended_prompts_i18n,
+                default_model_mode, default_model_value, default_permission_mode, default_permission_value,
+                default_skills_mode, default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+                default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.0)
+        .bind(&row.1)
+        .bind(&row.2)
+        .bind(&row.3)
+        .bind(&row.4)
+        .bind(&row.5)
+        .bind(&row.6)
+        .bind(&row.7)
+        .bind(&row.8)
+        .bind(&row.9)
+        .bind(&row.10)
+        .bind(&row.11)
+        .bind(&row.12)
+        .bind(&row.13)
+        .bind(&row.14)
+        .bind(&row.15)
+        .bind(&row.16)
+        .bind(&row.17)
+        .bind(&row.18)
+        .bind(&row.19)
+        .bind(&row.20)
+        .bind(&row.21)
+        .bind(&row.22)
+        .bind(&row.23)
+        .bind(&row.24)
+        .bind(&row.25)
+        .bind(&row.26)
+        .bind(&row.27)
+        .bind(&row.28)
+        .bind(&row.29)
+        .bind(&row.30)
+        .bind(&row.31)
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    }
+
+    for row in state_rows {
+        let overlay_key: String = row.get("overlay_key");
+        let definition_id = if overlays_use_definition_id {
+            overlay_key
+        } else {
+            let Some(definition_id) = definition_id_map.get(&overlay_key) else {
+                continue;
+            };
+            definition_id.clone()
+        };
+        sqlx::query(
+            "INSERT INTO assistant_overlays (
+                definition_id, enabled, sort_order, agent_backend_override, last_used_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(definition_id)
+        .bind(row.get::<bool, _>("enabled"))
+        .bind(row.get::<i32, _>("sort_order"))
+        .bind(row.get::<Option<String>, _>("agent_backend_override"))
+        .bind(row.get::<Option<i64>, _>("last_used_at"))
+        .bind(row.get::<i64, _>("created_at"))
+        .bind(row.get::<i64, _>("updated_at"))
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    }
+
+    for row in preference_rows {
+        let preference_key: String = row.get("preference_key");
+        let definition_id = if preferences_use_definition_id {
+            preference_key
+        } else {
+            let Some(definition_id) = definition_id_map.get(&preference_key) else {
+                continue;
+            };
+            definition_id.clone()
+        };
+        sqlx::query(
+            "INSERT INTO assistant_preferences (
+                definition_id, last_model_id, last_permission_value, last_skill_ids,
+                last_disabled_builtin_skill_ids, last_mcp_ids, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(definition_id)
+        .bind(row.get::<Option<String>, _>("last_model_id"))
+        .bind(row.get::<Option<String>, _>("last_permission_value"))
+        .bind(row.get::<String, _>("last_skill_ids"))
+        .bind(row.get::<String, _>("last_disabled_builtin_skill_ids"))
+        .bind(row.get::<String, _>("last_mcp_ids"))
+        .bind(row.get::<i64, _>("created_at"))
+        .bind(row.get::<i64, _>("updated_at"))
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    }
+
+    sqlx::query("DROP TABLE _assistant_definitions_legacy_v12")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    sqlx::query("DROP TABLE _assistant_overlays_legacy_v12")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    sqlx::query("DROP TABLE _assistant_preferences_legacy_v12")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+    tx.commit().await.map_err(DbError::Query)?;
+    Ok(())
+}
+
+async fn create_final_assistant_unification_tables(tx: &mut sqlx::Transaction<'_, Sqlite>) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE assistant_definitions (
+            definition_id                      TEXT PRIMARY KEY,
+            assistant_key                      TEXT    NOT NULL,
+            source                             TEXT    NOT NULL
+                                                       CHECK (source IN ('builtin', 'user', 'generated', 'extension')),
+            owner_type                         TEXT    NOT NULL
+                                                       CHECK (owner_type IN ('system', 'user', 'extension')),
+            source_ref                         TEXT,
+            source_version                     TEXT,
+            source_hash                        TEXT,
+            name                               TEXT    NOT NULL,
+            name_i18n                          TEXT    NOT NULL DEFAULT '{}',
+            description                        TEXT,
+            description_i18n                   TEXT    NOT NULL DEFAULT '{}',
+            avatar_type                        TEXT    NOT NULL DEFAULT 'none'
+                                                       CHECK (avatar_type IN ('none', 'emoji', 'builtin_asset', 'user_asset')),
+            avatar_value                       TEXT,
+            agent_backend                      TEXT    NOT NULL,
+            rule_resource_type                 TEXT    NOT NULL
+                                                       CHECK (rule_resource_type IN ('none', 'builtin_asset', 'user_file', 'inline', 'extension')),
+            rule_resource_ref                  TEXT,
+            rule_inline_content                TEXT,
+            recommended_prompts                TEXT    NOT NULL DEFAULT '[]',
+            recommended_prompts_i18n           TEXT    NOT NULL DEFAULT '{}',
+            default_model_mode                 TEXT    NOT NULL CHECK (default_model_mode IN ('unset', 'auto', 'fixed')),
+            default_model_value                TEXT,
+            default_permission_mode            TEXT    NOT NULL CHECK (default_permission_mode IN ('unset', 'auto', 'fixed')),
+            default_permission_value           TEXT,
+            default_skills_mode                TEXT    NOT NULL CHECK (default_skills_mode IN ('auto', 'fixed')),
+            default_skill_ids                  TEXT    NOT NULL DEFAULT '[]',
+            custom_skill_names                 TEXT    NOT NULL DEFAULT '[]',
+            default_disabled_builtin_skill_ids TEXT    NOT NULL DEFAULT '[]',
+            default_mcps_mode                  TEXT    NOT NULL CHECK (default_mcps_mode IN ('unset', 'auto', 'fixed')),
+            default_mcp_ids                    TEXT    NOT NULL DEFAULT '[]',
+            created_at                         INTEGER NOT NULL,
+            updated_at                         INTEGER NOT NULL,
+            deleted_at                         INTEGER
+        )",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(DbError::Query)?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_assistant_definitions_source_ref
+         ON assistant_definitions(source, source_ref)
+         WHERE source_ref IS NOT NULL",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(DbError::Query)?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_assistant_definitions_assistant_key
+         ON assistant_definitions(assistant_key)",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(DbError::Query)?;
+    sqlx::query("CREATE INDEX idx_assistant_definitions_source ON assistant_definitions(source)")
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::Query)?;
+    sqlx::query("CREATE INDEX idx_assistant_definitions_agent_backend ON assistant_definitions(agent_backend)")
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::Query)?;
+
+    sqlx::query(
+        "CREATE TABLE assistant_overlays (
+            definition_id         TEXT PRIMARY KEY,
+            enabled               INTEGER NOT NULL DEFAULT 1,
+            sort_order            INTEGER NOT NULL DEFAULT 0,
+            agent_backend_override TEXT,
+            last_used_at          INTEGER,
+            created_at            INTEGER NOT NULL,
+            updated_at            INTEGER NOT NULL,
+            FOREIGN KEY (definition_id) REFERENCES assistant_definitions(definition_id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(DbError::Query)?;
+    sqlx::query("CREATE INDEX idx_assistant_overlays_enabled ON assistant_overlays(enabled)")
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::Query)?;
+    sqlx::query("CREATE INDEX idx_assistant_overlays_sort_order ON assistant_overlays(sort_order)")
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::Query)?;
+
+    sqlx::query(
+        "CREATE TABLE assistant_preferences (
+            definition_id                    TEXT PRIMARY KEY,
+            last_model_id                    TEXT,
+            last_permission_value            TEXT,
+            last_skill_ids                   TEXT    NOT NULL DEFAULT '[]',
+            last_disabled_builtin_skill_ids  TEXT    NOT NULL DEFAULT '[]',
+            last_mcp_ids                     TEXT    NOT NULL DEFAULT '[]',
+            created_at                       INTEGER NOT NULL,
+            updated_at                       INTEGER NOT NULL,
+            FOREIGN KEY (definition_id) REFERENCES assistant_definitions(definition_id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(DbError::Query)?;
+
+    Ok(())
+}
+
+fn infer_avatar_storage(source: &str, avatar: Option<&str>) -> (String, Option<String>) {
+    let Some(value) = avatar.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ("none".to_string(), None);
+    };
+
+    let avatar_type = if looks_like_avatar_asset(value) {
+        match source {
+            "builtin" => "builtin_asset",
+            _ => "user_asset",
+        }
+    } else {
+        "emoji"
+    };
+
+    (avatar_type.to_string(), Some(value.to_string()))
+}
+
+fn looks_like_avatar_asset(value: &str) -> bool {
+    value.contains('/') || (Path::new(value).extension().is_some() && !value.starts_with('.'))
 }
 
 /// Ensure the system default user exists.

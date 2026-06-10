@@ -45,7 +45,8 @@ pub struct AssistantOverrideRow {
 /// Row mapping for the `assistant_definitions` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AssistantDefinitionRow {
-    pub id: String,
+    pub definition_id: String,
+    pub assistant_key: String,
     pub source: String,
     pub owner_type: String,
     pub source_ref: Option<String>,
@@ -55,7 +56,8 @@ pub struct AssistantDefinitionRow {
     pub name_i18n: String,
     pub description: Option<String>,
     pub description_i18n: String,
-    pub avatar: Option<String>,
+    pub avatar_type: String,
+    pub avatar_value: Option<String>,
     pub agent_backend: String,
     pub rule_resource_type: String,
     pub rule_resource_ref: Option<String>,
@@ -77,10 +79,10 @@ pub struct AssistantDefinitionRow {
     pub deleted_at: Option<TimestampMs>,
 }
 
-/// Row mapping for the `assistant_states` table.
+/// Row mapping for the `assistant_overlays` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AssistantStateRow {
-    pub assistant_id: String,
+pub struct AssistantOverlayRow {
+    pub definition_id: String,
     pub enabled: bool,
     pub sort_order: i32,
     pub agent_backend_override: Option<String>,
@@ -92,7 +94,7 @@ pub struct AssistantStateRow {
 /// Row mapping for the `assistant_preferences` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AssistantPreferenceRow {
-    pub assistant_id: String,
+    pub definition_id: String,
     pub last_model_id: Option<String>,
     pub last_permission_value: Option<String>,
     pub last_skill_ids: String,
@@ -159,7 +161,8 @@ pub struct UpsertOverrideParams<'a> {
 /// Insert-or-update parameters for `assistant_definitions`.
 #[derive(Debug, Clone)]
 pub struct UpsertAssistantDefinitionParams<'a> {
-    pub id: &'a str,
+    pub definition_id: &'a str,
+    pub assistant_key: &'a str,
     pub source: &'a str,
     pub owner_type: &'a str,
     pub source_ref: Option<&'a str>,
@@ -169,7 +172,8 @@ pub struct UpsertAssistantDefinitionParams<'a> {
     pub name_i18n: &'a str,
     pub description: Option<&'a str>,
     pub description_i18n: &'a str,
-    pub avatar: Option<&'a str>,
+    pub avatar_type: &'a str,
+    pub avatar_value: Option<&'a str>,
     pub agent_backend: &'a str,
     pub rule_resource_type: &'a str,
     pub rule_resource_ref: Option<&'a str>,
@@ -188,10 +192,10 @@ pub struct UpsertAssistantDefinitionParams<'a> {
     pub default_mcp_ids: &'a str,
 }
 
-/// Insert-or-update parameters for `assistant_states`.
+/// Insert-or-update parameters for `assistant_overlays`.
 #[derive(Debug, Clone)]
-pub struct UpsertAssistantStateParams<'a> {
-    pub assistant_id: &'a str,
+pub struct UpsertAssistantOverlayParams<'a> {
+    pub definition_id: &'a str,
     pub enabled: bool,
     pub sort_order: i32,
     pub agent_backend_override: Option<&'a str>,
@@ -201,7 +205,7 @@ pub struct UpsertAssistantStateParams<'a> {
 /// Insert-or-update parameters for `assistant_preferences`.
 #[derive(Debug, Clone)]
 pub struct UpsertAssistantPreferenceParams<'a> {
-    pub assistant_id: &'a str,
+    pub definition_id: &'a str,
     pub last_model_id: Option<&'a str>,
     pub last_permission_value: Option<&'a str>,
     pub last_skill_ids: &'a str,

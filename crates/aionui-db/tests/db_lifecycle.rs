@@ -1,5 +1,24 @@
+use std::time::Duration;
+
 use aionui_db::{init_database, init_database_memory, maybe_copy_legacy_database};
 use sqlx::Row;
+use sqlx::pool::PoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+
+async fn open_file_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+    PoolOptions::<sqlx::Sqlite>::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .busy_timeout(Duration::from_millis(5000))
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap()
+}
 
 // -- T1.1 Initialization --
 
@@ -88,6 +107,389 @@ async fn idempotent_reinit_preserves_data() {
         .unwrap();
 
     assert_eq!(row.get::<String, _>("username"), "alice");
+    db.close().await;
+}
+
+#[tokio::test]
+async fn idempotent_reinit_recovers_assistant_unification_checksum_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+
+    let db = init_database(&path).await.unwrap();
+    db.close().await;
+
+    let pool = PoolOptions::<sqlx::Sqlite>::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .busy_timeout(Duration::from_millis(5000))
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = x'00' WHERE version = 12")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let db = init_database(&path).await.unwrap();
+    let checksum: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 12")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_ne!(checksum, vec![0]);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn idempotent_reinit_repairs_legacy_assistant_unification_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+
+    let db = init_database(&path).await.unwrap();
+    db.close().await;
+
+    let pool = open_file_pool(&path).await;
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+    sqlx::query("DROP TABLE assistant_preferences")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE assistant_overlays")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE assistant_definitions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+CREATE TABLE assistant_definitions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    source_ref TEXT,
+    source_version TEXT,
+    source_hash TEXT,
+    name TEXT NOT NULL,
+    name_i18n TEXT NOT NULL DEFAULT '{}',
+    description TEXT,
+    description_i18n TEXT NOT NULL DEFAULT '{}',
+    avatar TEXT,
+    agent_backend TEXT NOT NULL,
+    rule_resource_type TEXT NOT NULL,
+    rule_resource_ref TEXT,
+    rule_inline_content TEXT,
+    recommended_prompts TEXT NOT NULL DEFAULT '[]',
+    recommended_prompts_i18n TEXT NOT NULL DEFAULT '{}',
+    default_model_mode TEXT NOT NULL,
+    default_model_value TEXT,
+    default_permission_mode TEXT NOT NULL,
+    default_permission_value TEXT,
+    default_skills_mode TEXT NOT NULL,
+    default_skill_ids TEXT NOT NULL DEFAULT '[]',
+    custom_skill_names TEXT NOT NULL DEFAULT '[]',
+    default_disabled_builtin_skill_ids TEXT NOT NULL DEFAULT '[]',
+    default_mcps_mode TEXT NOT NULL,
+    default_mcp_ids TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_assistant_definitions_source_ref
+         ON assistant_definitions(source, source_ref)
+         WHERE source_ref IS NOT NULL",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_definitions_source ON assistant_definitions(source)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_definitions_agent_backend ON assistant_definitions(agent_backend)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE assistant_states (
+            assistant_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            agent_backend_override TEXT,
+            last_used_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE assistant_preferences (
+            assistant_id TEXT PRIMARY KEY,
+            last_model_id TEXT,
+            last_permission_value TEXT,
+            last_skill_ids TEXT NOT NULL DEFAULT '[]',
+            last_disabled_builtin_skill_ids TEXT NOT NULL DEFAULT '[]',
+            last_mcp_ids TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assistant_definitions (
+            id, source, owner_type, source_ref, source_version, source_hash,
+            name, name_i18n, description, description_i18n, avatar,
+            agent_backend, rule_resource_type, rule_resource_ref, rule_inline_content,
+            recommended_prompts, recommended_prompts_i18n,
+            default_model_mode, default_model_value,
+            default_permission_mode, default_permission_value,
+            default_skills_mode, default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+            default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+        ) VALUES (
+            'u1', 'user', 'user', 'u1', NULL, NULL,
+            'Mine', '{}', 'desc', '{}', '🤖',
+            'aionrs', 'user_file', 'u1', NULL,
+            '[\"hello\"]', '{}',
+            'auto', NULL,
+            'auto', NULL,
+            'fixed', '[\"pdf\"]', '[]', '[]',
+            'auto', '[]', 1, 2, NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assistant_states (assistant_id, enabled, sort_order, agent_backend_override, last_used_at, created_at, updated_at)
+         VALUES ('u1', 0, 7, 'codex', 1234, 1, 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assistant_preferences (assistant_id, last_model_id, last_permission_value, last_skill_ids,
+            last_disabled_builtin_skill_ids, last_mcp_ids, created_at, updated_at)
+         VALUES ('u1', 'gpt-4.1', 'workspace-write', '[\"pdf\"]', '[]', '[\"mcp-1\"]', 1, 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
+    pool.close().await;
+
+    let db = init_database(&path).await.unwrap();
+    let row = sqlx::query(
+        "SELECT definition_id, assistant_key, avatar_type, avatar_value
+         FROM assistant_definitions WHERE assistant_key = 'u1'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let definition_id = row.get::<String, _>("definition_id");
+    assert_eq!(row.get::<String, _>("assistant_key"), "u1");
+    assert_eq!(row.get::<String, _>("avatar_type"), "emoji");
+    assert_eq!(row.get::<Option<String>, _>("avatar_value"), Some("🤖".to_string()));
+
+    let state_definition_id: String = sqlx::query_scalar("SELECT definition_id FROM assistant_overlays LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(state_definition_id, definition_id);
+
+    let pref_definition_id: String = sqlx::query_scalar("SELECT definition_id FROM assistant_preferences LIMIT 1")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(pref_definition_id, definition_id);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn idempotent_reinit_repairs_stale_assistant_definition_default_mode_constraints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+
+    let db = init_database(&path).await.unwrap();
+    db.close().await;
+
+    let pool = open_file_pool(&path).await;
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+    sqlx::query("DROP TABLE assistant_preferences")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE assistant_overlays")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE assistant_definitions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+CREATE TABLE assistant_definitions (
+    definition_id TEXT PRIMARY KEY,
+    assistant_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    source_ref TEXT,
+    source_version TEXT,
+    source_hash TEXT,
+    name TEXT NOT NULL,
+    name_i18n TEXT NOT NULL DEFAULT '{}',
+    description TEXT,
+    description_i18n TEXT NOT NULL DEFAULT '{}',
+    avatar_type TEXT NOT NULL DEFAULT 'none',
+    avatar_value TEXT,
+    agent_backend TEXT NOT NULL,
+    rule_resource_type TEXT NOT NULL,
+    rule_resource_ref TEXT,
+    rule_inline_content TEXT,
+    recommended_prompts TEXT NOT NULL DEFAULT '[]',
+    recommended_prompts_i18n TEXT NOT NULL DEFAULT '{}',
+    default_model_mode TEXT NOT NULL CHECK (default_model_mode IN ('auto', 'fixed')),
+    default_model_value TEXT,
+    default_permission_mode TEXT NOT NULL CHECK (default_permission_mode IN ('auto', 'fixed')),
+    default_permission_value TEXT,
+    default_skills_mode TEXT NOT NULL CHECK (default_skills_mode IN ('auto', 'fixed')),
+    default_skill_ids TEXT NOT NULL DEFAULT '[]',
+    custom_skill_names TEXT NOT NULL DEFAULT '[]',
+    default_disabled_builtin_skill_ids TEXT NOT NULL DEFAULT '[]',
+    default_mcps_mode TEXT NOT NULL CHECK (default_mcps_mode IN ('auto', 'fixed')),
+    default_mcp_ids TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_assistant_definitions_source_ref
+         ON assistant_definitions(source, source_ref)
+         WHERE source_ref IS NOT NULL",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_assistant_definitions_assistant_key
+         ON assistant_definitions(assistant_key)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_definitions_source ON assistant_definitions(source)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_definitions_agent_backend ON assistant_definitions(agent_backend)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE assistant_overlays (
+            definition_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            agent_backend_override TEXT,
+            last_used_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_overlays_enabled ON assistant_overlays(enabled)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE INDEX idx_assistant_overlays_sort_order ON assistant_overlays(sort_order)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE assistant_preferences (
+            definition_id TEXT PRIMARY KEY,
+            last_model_id TEXT,
+            last_permission_value TEXT,
+            last_skill_ids TEXT NOT NULL DEFAULT '[]',
+            last_disabled_builtin_skill_ids TEXT NOT NULL DEFAULT '[]',
+            last_mcp_ids TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assistant_definitions (
+            definition_id, assistant_key, source, owner_type, source_ref, source_version, source_hash,
+            name, name_i18n, description, description_i18n, avatar_type, avatar_value,
+            agent_backend, rule_resource_type, rule_resource_ref, rule_inline_content,
+            recommended_prompts, recommended_prompts_i18n,
+            default_model_mode, default_model_value,
+            default_permission_mode, default_permission_value,
+            default_skills_mode, default_skill_ids, custom_skill_names, default_disabled_builtin_skill_ids,
+            default_mcps_mode, default_mcp_ids, created_at, updated_at, deleted_at
+         ) VALUES (
+            'def-1', 'assistant-1', 'builtin', 'system', 'assistant-1', NULL, NULL,
+            'Builtin Assistant', '{}', 'desc', '{}', 'emoji', '🤖',
+            'codex', 'builtin_asset', 'assistant-1', NULL,
+            '[]', '{}',
+            'auto', NULL,
+            'auto', NULL,
+            'fixed', '[]', '[]', '[]',
+            'auto', '[]', 1000, 1000, NULL
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await.unwrap();
+    pool.close().await;
+
+    let db = init_database(&path).await.unwrap();
+    let table_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistant_definitions'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(table_sql.contains("default_model_mode IN ('unset', 'auto', 'fixed')"));
+    assert!(table_sql.contains("default_permission_mode IN ('unset', 'auto', 'fixed')"));
+    assert!(table_sql.contains("default_mcps_mode IN ('unset', 'auto', 'fixed')"));
+
+    sqlx::query(
+        "UPDATE assistant_definitions
+         SET default_model_mode = 'unset',
+             default_permission_mode = 'unset',
+             default_mcps_mode = 'unset'
+         WHERE definition_id = 'def-1'",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
     db.close().await;
 }
 

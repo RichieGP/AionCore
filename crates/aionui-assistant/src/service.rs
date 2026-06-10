@@ -14,7 +14,7 @@ use aionui_db::{
     AssistantOverrideRow, AssistantRow, CreateAssistantParams, IAssistantDefinitionRepository,
     IAssistantOverrideRepository, IAssistantPreferenceRepository, IAssistantRepository, IAssistantStateRepository,
     IProviderRepository, SqlitePool, UpdateAssistantParams, UpsertAssistantDefinitionParams,
-    UpsertAssistantStateParams, UpsertOverrideParams, rebuild_legacy_assistant_mirror,
+    UpsertAssistantStateParams, rebuild_legacy_assistant_mirror,
 };
 use aionui_extension::{
     AssistantClassifier, AssistantRuleDispatcher, ExtensionError, ExtensionRegistry, ResolvedAssistant,
@@ -160,6 +160,9 @@ impl AssistantService {
 
     async fn sync_legacy_user_assistants_to_new_tables(&self) -> Result<(), AssistantError> {
         for row in self.repo.list().await? {
+            if self.builtin.has(&row.id) {
+                continue;
+            }
             self.upsert_definition_from_legacy_user_row(&row).await?;
         }
         Ok(())
@@ -180,6 +183,7 @@ impl AssistantService {
                     assistant_id: &override_row.assistant_id,
                     enabled: override_row.enabled,
                     sort_order: override_row.sort_order,
+                    agent_backend_override: override_row.preset_agent_type.as_deref(),
                     last_used_at: override_row.last_used_at,
                 })
                 .await
@@ -450,6 +454,7 @@ impl AssistantService {
         };
 
         let row = self.repo.create(&params).await?;
+        self.upsert_definition_from_legacy_user_row(&row).await?;
         let ov = self.override_repo.get(&id).await?;
         user_row_to_response(&row, ov.as_ref())
     }
@@ -488,15 +493,25 @@ impl AssistantService {
                 let enabled = existing.as_ref().is_none_or(|o| o.enabled);
                 let sort_order = existing.as_ref().map(|o| o.sort_order).unwrap_or(0);
                 let last_used_at = existing.as_ref().and_then(|o| o.last_used_at);
-
-                let params = UpsertOverrideParams {
-                    assistant_id: id,
-                    enabled,
-                    sort_order,
-                    last_used_at,
-                    preset_agent_type: Some(Some(preset_agent_type)),
-                };
-                self.override_repo.upsert(&params).await?;
+                self.state_repo
+                    .upsert(&UpsertAssistantStateParams {
+                        assistant_id: id,
+                        enabled,
+                        sort_order,
+                        agent_backend_override: Some(preset_agent_type),
+                        last_used_at,
+                    })
+                    .await
+                    .map_err(|e| AssistantError::Internal(format!("upsert assistant state: {e}")))?;
+                let definition = self
+                    .definition_repo
+                    .get(id)
+                    .await?
+                    .ok_or_else(|| AssistantError::NotFound(format!("assistant '{id}' not found")))?;
+                let state = self.state_repo.get(id).await?;
+                rebuild_legacy_assistant_mirror(&self.pool, &definition, state.as_ref())
+                    .await
+                    .map_err(|e| AssistantError::Internal(format!("rebuild legacy mirror: {e}")))?;
                 return self.get(id).await;
             }
             AssistantSource::Extension => {
@@ -528,6 +543,7 @@ impl AssistantService {
             .update(id, &params)
             .await?
             .ok_or_else(|| AssistantError::NotFound(format!("assistant '{id}' not found")))?;
+        self.upsert_definition_from_legacy_user_row(&row).await?;
         let ov = self.override_repo.get(id).await?;
         user_row_to_response(&row, ov.as_ref())
     }
@@ -554,6 +570,15 @@ impl AssistantService {
         if let Err(e) = self.override_repo.delete(id).await {
             warn!("failed to remove override for deleted assistant '{id}': {e}");
         }
+        if let Err(e) = self.state_repo.delete(id).await {
+            warn!("failed to remove assistant state for deleted assistant '{id}': {e}");
+        }
+        if let Err(e) = self._preference_repo.delete(id).await {
+            warn!("failed to remove assistant preferences for deleted assistant '{id}': {e}");
+        }
+        if let Err(e) = self.definition_repo.soft_delete(id, now_ms()).await {
+            warn!("failed to soft-delete assistant definition for deleted assistant '{id}': {e}");
+        }
 
         // Best-effort filesystem cleanup.
         self.cleanup_user_assets(id);
@@ -579,27 +604,49 @@ impl AssistantService {
             }
         }
 
-        // Merge with existing override to preserve fields not in this request.
+        // Merge with existing state/override to preserve fields not in this request.
+        let existing_state = self.state_repo.get(id).await?;
         let existing = self.override_repo.get(id).await?;
         let enabled = req
             .enabled
-            .unwrap_or_else(|| existing.as_ref().is_none_or(|o| o.enabled));
+            .unwrap_or_else(|| {
+                existing_state
+                    .as_ref()
+                    .map(|state| state.enabled)
+                    .unwrap_or_else(|| existing.as_ref().is_none_or(|o| o.enabled))
+            });
         let sort_order = req
             .sort_order
+            .or_else(|| existing_state.as_ref().map(|state| state.sort_order))
             .or_else(|| existing.as_ref().map(|o| o.sort_order))
             .unwrap_or(0);
         let last_used_at = req
             .last_used_at
+            .or_else(|| existing_state.as_ref().and_then(|state| state.last_used_at))
             .or_else(|| existing.as_ref().and_then(|o| o.last_used_at));
-
-        let params = UpsertOverrideParams {
-            assistant_id: id,
-            enabled,
-            sort_order,
-            last_used_at,
-            preset_agent_type: None,
-        };
-        self.override_repo.upsert(&params).await?;
+        let agent_backend_override = existing_state
+            .as_ref()
+            .and_then(|state| state.agent_backend_override.as_deref())
+            .or_else(|| existing.as_ref().and_then(|o| o.preset_agent_type.as_deref()));
+        let state = self
+            .state_repo
+            .upsert(&UpsertAssistantStateParams {
+                assistant_id: id,
+                enabled,
+                sort_order,
+                agent_backend_override,
+                last_used_at,
+            })
+            .await
+            .map_err(|e| AssistantError::Internal(format!("upsert assistant state: {e}")))?;
+        let definition = self
+            .definition_repo
+            .get(id)
+            .await?
+            .ok_or_else(|| AssistantError::NotFound(format!("assistant '{id}' not found")))?;
+        rebuild_legacy_assistant_mirror(&self.pool, &definition, Some(&state))
+            .await
+            .map_err(|e| AssistantError::Internal(format!("rebuild legacy mirror: {e}")))?;
 
         self.get(id).await
     }
@@ -712,7 +759,10 @@ impl AssistantService {
             };
 
             match self.repo.create(&params).await {
-                Ok(_) => result.imported += 1,
+                Ok(row) => {
+                    self.upsert_definition_from_legacy_user_row(&row).await?;
+                    result.imported += 1;
+                }
                 Err(aionui_db::DbError::Conflict(_)) => {
                     // Someone raced us into the table — treat as skip to
                     // keep import idempotent across retries.
@@ -1366,6 +1416,7 @@ mod tests {
             extension_registry,
             tmp.path().to_path_buf(),
         );
+        service.bootstrap_assistant_storage().await.unwrap();
 
         Fixture {
             service,

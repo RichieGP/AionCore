@@ -502,17 +502,20 @@ impl IAssistantStateRepository for SqliteAssistantStateRepository {
     async fn upsert(&self, params: &UpsertAssistantStateParams<'_>) -> Result<AssistantStateRow, DbError> {
         let now = now_ms();
         sqlx::query(
-            "INSERT INTO assistant_states (assistant_id, enabled, sort_order, last_used_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO assistant_states (
+                assistant_id, enabled, sort_order, agent_backend_override, last_used_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(assistant_id) DO UPDATE SET
                 enabled = excluded.enabled,
                 sort_order = excluded.sort_order,
+                agent_backend_override = excluded.agent_backend_override,
                 last_used_at = excluded.last_used_at,
                 updated_at = excluded.updated_at",
         )
         .bind(params.assistant_id)
         .bind(params.enabled)
         .bind(params.sort_order)
+        .bind(params.agent_backend_override)
         .bind(params.last_used_at)
         .bind(now)
         .bind(now)
@@ -648,6 +651,7 @@ pub async fn rebuild_legacy_assistant_mirror(
 
     let enabled = state.map(|row| row.enabled).unwrap_or(true);
     let sort_order = state.map(|row| row.sort_order).unwrap_or_default();
+    let agent_backend_override = state.and_then(|row| row.agent_backend_override.clone());
     let last_used_at = state.and_then(|row| row.last_used_at);
 
     sqlx::query(
@@ -663,7 +667,7 @@ pub async fn rebuild_legacy_assistant_mirror(
     .bind(&definition.id)
     .bind(enabled)
     .bind(sort_order)
-    .bind::<Option<String>>(None)
+    .bind(agent_backend_override)
     .bind(last_used_at)
     .bind(state.map(|row| row.updated_at).unwrap_or(definition.updated_at))
     .execute(pool)
@@ -1043,6 +1047,7 @@ mod tests {
             assistant_id: "u1",
             enabled: false,
             sort_order: 9,
+            agent_backend_override: Some("claude"),
             last_used_at: Some(1234),
         })
         .await
@@ -1053,6 +1058,7 @@ mod tests {
         assert_eq!(list[0].assistant_id, "u1");
         assert!(!list[0].enabled);
         assert_eq!(list[0].sort_order, 9);
+        assert_eq!(list[0].agent_backend_override.as_deref(), Some("claude"));
     }
 
     #[tokio::test]
@@ -1085,6 +1091,7 @@ mod tests {
                 assistant_id: "u1",
                 enabled: false,
                 sort_order: 7,
+                agent_backend_override: Some("claude"),
                 last_used_at: Some(999),
             })
             .await

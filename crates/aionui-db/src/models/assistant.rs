@@ -83,6 +83,7 @@ pub struct AssistantStateRow {
     pub assistant_id: String,
     pub enabled: bool,
     pub sort_order: i32,
+    pub agent_backend_override: Option<String>,
     pub last_used_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
@@ -193,6 +194,7 @@ pub struct UpsertAssistantStateParams<'a> {
     pub assistant_id: &'a str,
     pub enabled: bool,
     pub sort_order: i32,
+    pub agent_backend_override: Option<&'a str>,
     pub last_used_at: Option<TimestampMs>,
 }
 

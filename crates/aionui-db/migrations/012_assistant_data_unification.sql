@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS assistant_states (
     assistant_id  TEXT PRIMARY KEY,
     enabled       INTEGER NOT NULL DEFAULT 1,
     sort_order    INTEGER NOT NULL DEFAULT 0,
+    agent_backend_override TEXT,
     last_used_at  INTEGER,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL,

@@ -63,7 +63,10 @@ pub async fn connect(
         .map_err(|e| SttError::RequestFailed(format!("invalid Deepgram API key for Authorization header: {e}")))?;
     request.headers_mut().insert("Authorization", auth);
 
-    let (ws, _) = tokio_tungstenite::connect_async(request).await.map_err(connect_error)?;
+    let connector = crate::stt_stream_tls::build_ws_connector()?;
+    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+        .await
+        .map_err(connect_error)?;
     Ok(DeepgramStream { ws })
 }
 

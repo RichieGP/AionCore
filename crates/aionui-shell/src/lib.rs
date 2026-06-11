@@ -13,6 +13,7 @@ pub mod stt_stream;
 pub mod stt_stream_deepgram;
 pub mod stt_stream_openai;
 pub mod stt_stream_provider;
+pub(crate) mod stt_stream_tls;
 
 pub use error::{ShellError, SttError};
 pub use opener::{DefaultSystemOpener, ISystemOpener, NoopSystemOpener};

@@ -211,16 +211,52 @@ async fn session_update_is_sent_first_with_model_and_pcm_format() {
             value["session"]["audio"]["input"]["transcription"]["model"],
             "gpt-4o-transcribe"
         );
-        // No language was configured or hinted.
+        // No language was configured or hinted, and no prompt was set.
+        let transcription = &value["session"]["audio"]["input"]["transcription"];
+        assert!(transcription.get("language").is_none());
+        assert!(transcription.get("prompt").is_none());
+    })
+    .await;
+
+    let _stream = connect(&make_config(&base_url), 24000).await;
+    within(handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn session_update_carries_configured_prompt() {
+    // The prompt steers transcription style (e.g. Simplified vs Traditional
+    // script for `zh`), mirroring the file path's prompt forwarding.
+    let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
+        let value = read_session_update(&mut ws).await;
+        assert_eq!(
+            value["session"]["audio"]["input"]["transcription"]["prompt"],
+            "请使用简体中文输出"
+        );
+    })
+    .await;
+
+    let mut config = make_config(&base_url);
+    config.prompt = Some("请使用简体中文输出".into());
+    let _stream = connect(&config, 24000).await;
+    within(handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn blank_prompt_is_omitted_from_session_update() {
+    // Settings UI may save an unfilled prompt as "" — must not be forwarded.
+    let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
+        let value = read_session_update(&mut ws).await;
         assert!(
             value["session"]["audio"]["input"]["transcription"]
-                .get("language")
+                .get("prompt")
                 .is_none()
         );
     })
     .await;
 
-    let _stream = connect(&make_config(&base_url), 24000).await;
+    let mut config = make_config(&base_url);
+    config.prompt = Some("   ".into());
+    let _stream = connect(&config, 24000).await;
     within(handle).await.unwrap();
 }
 

@@ -92,7 +92,8 @@ pub async fn connect(
     }
 
     let language = resolve_language(config.language.as_deref(), language_hint);
-    let payload = session_update_payload(&config.model, sample_rate, language.as_deref());
+    let prompt = config.prompt.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let payload = session_update_payload(&config.model, sample_rate, language.as_deref(), prompt);
     ws.send(Message::Text(payload.into()))
         .await
         .map_err(|e| SttError::RequestFailed(format!("OpenAI session.update send failed: {e}")))?;
@@ -159,11 +160,16 @@ fn resolve_language(config_language: Option<&str>, language_hint: Option<&str>) 
 /// Uses the GA Realtime API shape: `session.type = "transcription"` with the
 /// input format and transcription model under `session.audio.input`.
 /// `turn_detection` is left at the server default (VAD) so partial
-/// transcripts flow while the user is still speaking.
-fn session_update_payload(model: &str, sample_rate: u32, language: Option<&str>) -> String {
+/// transcripts flow while the user is still speaking. The optional `prompt`
+/// guides the model's style (e.g. steering `zh` output to Simplified or
+/// Traditional script), mirroring the file path (`stt_openai::transcribe`).
+fn session_update_payload(model: &str, sample_rate: u32, language: Option<&str>, prompt: Option<&str>) -> String {
     let mut transcription = serde_json::json!({ "model": model });
     if let Some(lang) = language {
         transcription["language"] = serde_json::Value::String(lang.to_owned());
+    }
+    if let Some(prompt) = prompt {
+        transcription["prompt"] = serde_json::Value::String(prompt.to_owned());
     }
     serde_json::json!({
         "type": "session.update",
@@ -446,8 +452,8 @@ mod tests {
     // -- session_update_payload ---------------------------------------------------
 
     #[test]
-    fn session_update_carries_model_format_and_language() {
-        let payload = session_update_payload("gpt-4o-transcribe", 24000, Some("en"));
+    fn session_update_carries_model_format_language_and_prompt() {
+        let payload = session_update_payload("gpt-4o-transcribe", 24000, Some("en"), Some("expect tech words"));
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["type"], "session.update");
         assert_eq!(value["session"]["type"], "transcription");
@@ -458,17 +464,19 @@ mod tests {
             "gpt-4o-transcribe"
         );
         assert_eq!(value["session"]["audio"]["input"]["transcription"]["language"], "en");
+        assert_eq!(
+            value["session"]["audio"]["input"]["transcription"]["prompt"],
+            "expect tech words"
+        );
     }
 
     #[test]
-    fn session_update_omits_language_when_unset() {
-        let payload = session_update_payload("gpt-4o-mini-transcribe", 24000, None);
+    fn session_update_omits_language_and_prompt_when_unset() {
+        let payload = session_update_payload("gpt-4o-mini-transcribe", 24000, None, None);
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert!(
-            value["session"]["audio"]["input"]["transcription"]
-                .get("language")
-                .is_none()
-        );
+        let transcription = &value["session"]["audio"]["input"]["transcription"];
+        assert!(transcription.get("language").is_none());
+        assert!(transcription.get("prompt").is_none());
     }
 
     // -- parse_text_frame -----------------------------------------------------

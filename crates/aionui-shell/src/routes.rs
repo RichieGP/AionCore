@@ -35,6 +35,7 @@ impl From<SttError> for ApiError {
             }
             SttError::RequestFailed(_) => ApiError::BadGateway(err.to_string()),
             SttError::Unknown(_) => ApiError::Internal(err.to_string()),
+            SttError::StreamUnsupported | SttError::StreamProtocol(_) => ApiError::BadRequest(err.to_string()),
         }
     }
 }
@@ -469,5 +470,17 @@ mod tests {
     fn stt_unknown_maps_to_internal() {
         let err = ApiError::from(SttError::Unknown("unexpected".into()));
         assert!(matches!(err, ApiError::Internal(msg) if msg.contains("unexpected")));
+    }
+
+    #[test]
+    fn stt_stream_unsupported_maps_to_bad_request() {
+        let err = ApiError::from(SttError::StreamUnsupported);
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("not supported")));
+    }
+
+    #[test]
+    fn stt_stream_protocol_maps_to_bad_request() {
+        let err = ApiError::from(SttError::StreamProtocol("bad frame".into()));
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("bad frame")));
     }
 }

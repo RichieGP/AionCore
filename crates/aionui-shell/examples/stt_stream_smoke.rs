@@ -80,7 +80,14 @@ async fn main() {
     println!("[smoke] connecting upstream (provider={provider}, model={model})...");
     let t0 = std::time::Instant::now();
     let mut upstream = ProviderUpstreamFactory
-        .connect(&config, 24000, std::env::var("STT_SMOKE_LANG").ok().filter(|s| !s.is_empty()).as_deref())
+        .connect(
+            &config,
+            24000,
+            std::env::var("STT_SMOKE_LANG")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .as_deref(),
+        )
         .await
         .expect("upstream connect failed");
     println!("[smoke] connected in {:?}", t0.elapsed());

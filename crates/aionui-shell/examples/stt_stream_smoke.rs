@@ -29,7 +29,11 @@ fn wav_pcm_payload(bytes: &[u8]) -> &[u8] {
 async fn main() {
     let provider = std::env::var("STT_SMOKE_PROVIDER").unwrap_or_else(|_| "openai".into());
     let api_key = std::env::var("STT_SMOKE_API_KEY").expect("STT_SMOKE_API_KEY required");
-    let default_model = if provider == "deepgram" { "nova-3" } else { "gpt-4o-mini-transcribe" };
+    let default_model = if provider == "deepgram" {
+        "nova-3"
+    } else {
+        "gpt-4o-mini-transcribe"
+    };
     let model = std::env::var("STT_SMOKE_MODEL").unwrap_or_else(|_| default_model.into());
     let wav_path = std::env::args().nth(1).expect("usage: stt_stream_smoke <wav>");
 

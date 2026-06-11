@@ -234,7 +234,11 @@ async fn abrupt_server_close_surfaces_request_failed() {
 }
 
 #[tokio::test]
-async fn detect_language_replaces_language_param() {
+async fn no_language_streams_in_multi_mode_instead_of_detect_language() {
+    // Deepgram language detection is batch-only; on live streams it silently
+    // falls back to the English model. Without an explicit language the
+    // adapter must request multilingual code-switching mode instead — even
+    // when the config asks for detection.
     let (base_url, captured, handle) = spawn_server(|_ws| async {}).await;
 
     let mut config = make_config(&base_url);
@@ -243,8 +247,26 @@ async fn detect_language_replaces_language_param() {
     within(handle).await.unwrap();
 
     let uri = captured.lock().unwrap().clone().unwrap().uri;
-    assert!(uri.contains("detect_language=true"), "got {uri}");
-    assert!(!uri.contains("&language=") && !uri.contains("?language="), "got {uri}");
+    assert!(!uri.contains("detect_language="), "got {uri}");
+    assert!(uri.contains("language=multi"), "got {uri}");
+    assert!(uri.contains("endpointing=100"), "got {uri}");
+}
+
+#[tokio::test]
+async fn explicit_language_suppresses_multi_mode() {
+    let (base_url, captured, handle) = spawn_server(|_ws| async {}).await;
+
+    let mut config = make_config(&base_url);
+    config.detect_language = Some(true);
+    config.language = Some("zh-CN".into());
+    let _stream = connect(&config, 16000).await;
+    within(handle).await.unwrap();
+
+    let uri = captured.lock().unwrap().clone().unwrap().uri;
+    assert!(uri.contains("language=zh-CN"), "got {uri}");
+    assert!(!uri.contains("language=multi"), "got {uri}");
+    assert!(!uri.contains("endpointing="), "got {uri}");
+    assert!(!uri.contains("detect_language="), "got {uri}");
 }
 
 #[tokio::test]

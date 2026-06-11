@@ -89,11 +89,18 @@ fn connect_error(e: tungstenite::Error) -> SttError {
 
 /// Build the `wss://.../v1/listen?...` URL.
 ///
-/// Query parameters mirror `stt_deepgram::transcribe` exactly: an explicit
-/// language (hint, falling back to config) wins and suppresses
-/// `detect_language`; `punctuate`/`smart_format` are sent only when `true`.
-/// Streaming additions: `encoding`/`sample_rate`/`channels` describe the raw
-/// PCM16 input, and `interim_results=true` enables partial transcripts.
+/// Query parameters mirror `stt_deepgram::transcribe` where applicable: an
+/// explicit language (hint, falling back to config) wins;
+/// `punctuate`/`smart_format` are sent only when `true`. Streaming additions:
+/// `encoding`/`sample_rate`/`channels` describe the raw PCM16 input, and
+/// `interim_results=true` enables partial transcripts.
+///
+/// Divergence from the file path: Deepgram language detection
+/// (`detect_language`) is batch-only and silently falls back to the English
+/// model on live streams. When no explicit language resolves, streaming uses
+/// `language=multi` (nova-2/nova-3 multilingual code-switching mode) with
+/// Deepgram's recommended `endpointing=100`; the `detect_language` config
+/// flag is irrelevant for streaming.
 fn build_ws_url(config: &DeepgramSpeechToTextConfig, sample_rate: u32, language_hint: Option<&str>) -> String {
     let base = resolve_base_url(config.base_url.as_deref());
     let ws_base = if let Some(rest) = base.strip_prefix("https://") {
@@ -116,8 +123,12 @@ fn build_ws_url(config: &DeepgramSpeechToTextConfig, sample_rate: u32, language_
     let language = language_hint.or(config.language.as_deref()).filter(|s| !s.is_empty());
     if let Some(lang) = language {
         params.push(("language", lang.to_owned()));
-    } else if config.detect_language == Some(true) {
-        params.push(("detect_language", "true".to_owned()));
+    } else {
+        // Deepgram language detection is batch-only; streaming uses
+        // language=multi (code-switching), with endpointing=100 as
+        // recommended by Deepgram for multilingual streams.
+        params.push(("language", "multi".to_owned()));
+        params.push(("endpointing", "100".to_owned()));
     }
 
     if config.punctuate == Some(true) {
@@ -260,7 +271,9 @@ mod tests {
         assert!(url.contains("channels=1"));
         assert!(url.contains("interim_results=true"));
         assert!(url.contains("model=nova-3"));
-        assert!(!url.contains("language="));
+        // No explicit language: multilingual code-switching mode.
+        assert!(url.contains("language=multi"), "got {url}");
+        assert!(url.contains("endpointing=100"), "got {url}");
         assert!(!url.contains("punctuate="));
         assert!(!url.contains("smart_format="));
     }
@@ -283,13 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn language_hint_wins_over_config_language_and_suppresses_detection() {
+    fn language_hint_wins_over_config_language_and_suppresses_multi_mode() {
         let mut config = make_config();
         config.language = Some("es".into());
         config.detect_language = Some(true);
         let url = build_ws_url(&config, 16000, Some("zh-CN"));
         assert!(url.contains("language=zh-CN"), "got {url}");
-        assert!(!url.contains("detect_language=true"));
+        assert!(!url.contains("detect_language="));
+        assert!(!url.contains("language=multi"));
+        assert!(!url.contains("endpointing="));
     }
 
     #[test]
@@ -298,15 +313,19 @@ mod tests {
         config.language = Some("es".into());
         let url = build_ws_url(&config, 16000, None);
         assert!(url.contains("language=es"), "got {url}");
+        assert!(!url.contains("endpointing="), "got {url}");
     }
 
     #[test]
-    fn detect_language_is_sent_only_without_language() {
+    fn no_language_uses_multi_mode_and_never_detect_language() {
+        // Deepgram language detection is batch-only; streaming must use
+        // language=multi even when the config asks for detection.
         let mut config = make_config();
         config.detect_language = Some(true);
         let url = build_ws_url(&config, 16000, None);
-        assert!(url.contains("detect_language=true"), "got {url}");
-        assert!(!url.contains("&language="));
+        assert!(!url.contains("detect_language="), "got {url}");
+        assert!(url.contains("language=multi"), "got {url}");
+        assert!(url.contains("endpointing=100"), "got {url}");
     }
 
     #[test]

@@ -89,12 +89,25 @@ fn make_config(base_url: &str) -> OpenAISpeechToTextConfig {
     }
 }
 
-fn delta_frame(delta: &str) -> Message {
+fn committed_frame(item_id: &str) -> Message {
+    Message::Text(
+        serde_json::json!({
+            "type": "input_audio_buffer.committed",
+            "event_id": "event_0",
+            "previous_item_id": null,
+            "item_id": item_id,
+        })
+        .to_string()
+        .into(),
+    )
+}
+
+fn delta_frame(item_id: &str, delta: &str) -> Message {
     Message::Text(
         serde_json::json!({
             "type": "conversation.item.input_audio_transcription.delta",
             "event_id": "event_1",
-            "item_id": "item_1",
+            "item_id": item_id,
             "content_index": 0,
             "delta": delta,
         })
@@ -103,12 +116,12 @@ fn delta_frame(delta: &str) -> Message {
     )
 }
 
-fn completed_frame(transcript: &str) -> Message {
+fn completed_frame(item_id: &str, transcript: &str) -> Message {
     Message::Text(
         serde_json::json!({
             "type": "conversation.item.input_audio_transcription.completed",
             "event_id": "event_2",
-            "item_id": "item_1",
+            "item_id": item_id,
             "content_index": 0,
             "transcript": transcript,
         })
@@ -270,12 +283,12 @@ async fn finish_sends_commit_event() {
 async fn deltas_accumulate_and_completed_resets_partial_buffer() {
     let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
         read_session_update(&mut ws).await;
-        ws.send(delta_frame("he")).await.unwrap();
-        ws.send(delta_frame("llo")).await.unwrap();
-        ws.send(completed_frame("hello")).await.unwrap();
+        ws.send(delta_frame("item_1", "he")).await.unwrap();
+        ws.send(delta_frame("item_1", "llo")).await.unwrap();
+        ws.send(completed_frame("item_1", "hello")).await.unwrap();
         // A new item after a completed transcript must start from scratch:
-        // the partial buffer was reset by the completed event.
-        ws.send(delta_frame("wo")).await.unwrap();
+        // the first item's partial buffer was dropped by its completed event.
+        ws.send(delta_frame("item_2", "wo")).await.unwrap();
         ws.send(Message::Close(None)).await.unwrap();
     })
     .await;
@@ -316,13 +329,14 @@ async fn lifecycle_events_are_skipped() {
             r#"{"type":"session.updated","session":{}}"#,
             r#"{"type":"input_audio_buffer.speech_started","audio_start_ms":10}"#,
             r#"{"type":"input_audio_buffer.speech_stopped","audio_end_ms":900}"#,
-            r#"{"type":"input_audio_buffer.committed","item_id":"item_1"}"#,
             r#"{"type":"conversation.item.created","item":{}}"#,
             r#"{"type":"rate_limits.updated","rate_limits":[]}"#,
         ] {
             ws.send(Message::Text(frame.into())).await.unwrap();
         }
-        ws.send(completed_frame("hi")).await.unwrap();
+        // `committed` is consumed for item tracking, not surfaced either.
+        ws.send(committed_frame("item_1")).await.unwrap();
+        ws.send(completed_frame("item_1", "hi")).await.unwrap();
         ws.send(Message::Close(None)).await.unwrap();
     })
     .await;
@@ -338,14 +352,16 @@ async fn lifecycle_events_are_skipped() {
 async fn adapter_initiates_close_after_commit_and_final_transcript() {
     // OpenAI keeps the socket open after delivering the last `completed`
     // event; the adapter must initiate the close handshake itself so the
-    // session can observe `Closed` and emit `Done`. The mock stays silent
-    // after `completed` until the client's Close arrives.
+    // session can observe `Closed` and emit `Done`. The manual commit is
+    // acknowledged with a `committed` event whose item then completes; the
+    // mock stays silent after `completed` until the client's Close arrives.
     let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
         read_session_update(&mut ws).await;
         let value = read_json(&mut ws).await;
         assert_eq!(value["type"], "input_audio_buffer.commit");
-        ws.send(delta_frame("done")).await.unwrap();
-        ws.send(completed_frame("done")).await.unwrap();
+        ws.send(committed_frame("item_1")).await.unwrap();
+        ws.send(delta_frame("item_1", "done")).await.unwrap();
+        ws.send(completed_frame("item_1", "done")).await.unwrap();
         expect_client_close(&mut ws).await;
     })
     .await;
@@ -354,6 +370,65 @@ async fn adapter_initiates_close_after_commit_and_final_transcript() {
     within(stream.finish()).await.unwrap();
     assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("done".into()));
     assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Final("done".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Closed);
+    within(handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn close_waits_for_tail_item_finalized_after_commit() {
+    // Regression test for real-API tail loss: server VAD finalized a first
+    // item BEFORE the manual commit; the commit then created a second item
+    // holding the tail audio. The adapter must not treat the first item's
+    // final as "done" — it has to wait until the tail item's transcript
+    // arrives before initiating close, or the tail sentence is lost.
+    let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
+        read_session_update(&mut ws).await;
+        // Server VAD segment: item_a is committed and finalized on its own.
+        ws.send(committed_frame("item_a")).await.unwrap();
+        ws.send(delta_frame("item_a", "one")).await.unwrap();
+        ws.send(completed_frame("item_a", "one")).await.unwrap();
+        // The manual commit arrives only now (client called finish()).
+        let value = read_json(&mut ws).await;
+        assert_eq!(value["type"], "input_audio_buffer.commit");
+        // Its acknowledgement creates the tail item, still transcribing.
+        ws.send(committed_frame("item_b")).await.unwrap();
+        ws.send(delta_frame("item_b", "two")).await.unwrap();
+        ws.send(completed_frame("item_b", "two")).await.unwrap();
+        // Reaching this point only after sending item_b's completed proves
+        // the adapter did not initiate close while item_b was pending; if it
+        // had, the sends above would precede the Close in the stream and the
+        // client-side event order assertions below would fail.
+        expect_client_close(&mut ws).await;
+    })
+    .await;
+
+    let mut stream = connect(&make_config(&base_url), 24000).await;
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("one".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Final("one".into()));
+    within(stream.finish()).await.unwrap();
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("two".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Final("two".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Closed);
+    within(handle).await.unwrap();
+}
+
+#[tokio::test]
+async fn interleaved_item_deltas_accumulate_per_item() {
+    // Deltas from different items must not contaminate each other's
+    // accumulated partial text.
+    let (base_url, _captured, handle) = spawn_server(|mut ws| async move {
+        read_session_update(&mut ws).await;
+        ws.send(delta_frame("item_a", "he")).await.unwrap();
+        ws.send(delta_frame("item_b", "x")).await.unwrap();
+        ws.send(delta_frame("item_a", "llo")).await.unwrap();
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+
+    let mut stream = connect(&make_config(&base_url), 24000).await;
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("he".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("x".into()));
+    assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Partial("hello".into()));
     assert_eq!(expect_event(&mut stream).await, UpstreamEvent::Closed);
     within(handle).await.unwrap();
 }
@@ -456,7 +531,7 @@ async fn factory_rejects_empty_api_key() {
 async fn factory_connects_through_upstream_stream_trait() {
     let (base_url, captured, handle) = spawn_server(|mut ws| async move {
         read_session_update(&mut ws).await;
-        ws.send(completed_frame("via factory")).await.unwrap();
+        ws.send(completed_frame("item_1", "via factory")).await.unwrap();
         ws.send(Message::Close(None)).await.unwrap();
     })
     .await;

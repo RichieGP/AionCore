@@ -13,6 +13,8 @@
 //! `input_audio_buffer.commit`. Transcripts come back as
 //! `conversation.item.input_audio_transcription.delta` / `.completed` events.
 
+use std::collections::{HashMap, HashSet};
+
 use aionui_api_types::{OpenAISpeechToTextConfig, SpeechToTextConfig};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
@@ -97,9 +99,10 @@ pub async fn connect(
 
     Ok(OpenAIRealtimeStream {
         ws,
-        partial_buf: String::new(),
+        partials: HashMap::new(),
+        pending_items: HashSet::new(),
         finished: false,
-        final_delivered: false,
+        commit_acked: false,
         close_sent: false,
     })
 }
@@ -178,16 +181,28 @@ fn session_update_payload(model: &str, sample_rate: u32, language: Option<&str>)
 }
 
 /// Live OpenAI realtime WebSocket adapted to [`UpstreamStream`].
+///
+/// Server VAD splits the audio into multiple conversation items, each with
+/// its own delta/completed transcription lifecycle — possibly interleaved.
+/// The stream therefore tracks state per item: which items still owe a
+/// transcript (`pending_items`) and the accumulated partial text per item
+/// (`partials`). The connection is only closed once the manual commit has
+/// been acknowledged and every known item has finished transcribing,
+/// otherwise the tail item's transcript would be lost.
 pub struct OpenAIRealtimeStream {
     ws: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    /// Accumulated delta text for the item currently being transcribed.
-    /// `Partial` events carry the whole un-finalized text, not the delta.
-    partial_buf: String,
-    /// `finish()` was called (the commit event was sent).
+    /// Accumulated delta text per item currently being transcribed.
+    /// `Partial` events carry the item's whole un-finalized text, not the delta.
+    partials: HashMap<String, String>,
+    /// Items whose transcription has started (committed buffer segment or
+    /// first delta) but not yet completed/failed.
+    pending_items: HashSet<String>,
+    /// `finish()` was called (the manual commit event was sent).
     finished: bool,
-    /// A `completed` transcript (or a benign empty-commit error) has been
-    /// observed, i.e. no further transcript is expected after a commit.
-    final_delivered: bool,
+    /// The manual commit was acknowledged: either an
+    /// `input_audio_buffer.committed` event or the benign
+    /// `input_audio_buffer_commit_empty` error arrived after `finish()`.
+    commit_acked: bool,
     /// The client-side close handshake has been initiated.
     close_sent: bool,
 }
@@ -195,10 +210,15 @@ pub struct OpenAIRealtimeStream {
 /// Outcome of decoding one OpenAI realtime text frame. Synchronous on
 /// purpose: `next_event` must not hold a decoded event across an await.
 enum Parsed {
-    /// Transcription delta text for the current item.
-    Delta(String),
-    /// Final transcript for the current item.
-    Completed(String),
+    /// A buffer segment was committed (server VAD or our manual commit) and
+    /// became a conversation item awaiting transcription.
+    Committed { item_id: String },
+    /// Transcription delta text for one item.
+    Delta { item_id: String, delta: String },
+    /// Final transcript for one item.
+    Completed { item_id: String, transcript: String },
+    /// Transcription failed for one item.
+    Failed { item_id: String, error: SttError },
     /// Fatal upstream error.
     Error(SttError),
     /// `input_audio_buffer.commit` on an empty/too-short buffer: benign after
@@ -217,18 +237,26 @@ fn parse_text_frame(text: &str) -> Parsed {
         }
     };
 
+    // Item ids key the per-item state; a consistently absent id degrades to
+    // a single "" item, which still pairs inserts with removals correctly.
+    let item_id = || value["item_id"].as_str().unwrap_or("").to_owned();
+
     match value["type"].as_str() {
-        Some("conversation.item.input_audio_transcription.delta") => {
-            Parsed::Delta(value["delta"].as_str().unwrap_or("").to_owned())
-        }
-        Some("conversation.item.input_audio_transcription.completed") => {
-            Parsed::Completed(value["transcript"].as_str().unwrap_or("").to_owned())
-        }
+        Some("input_audio_buffer.committed") => Parsed::Committed { item_id: item_id() },
+        Some("conversation.item.input_audio_transcription.delta") => Parsed::Delta {
+            item_id: item_id(),
+            delta: value["delta"].as_str().unwrap_or("").to_owned(),
+        },
+        Some("conversation.item.input_audio_transcription.completed") => Parsed::Completed {
+            item_id: item_id(),
+            transcript: value["transcript"].as_str().unwrap_or("").to_owned(),
+        },
         Some("conversation.item.input_audio_transcription.failed") => {
             let message = value["error"]["message"].as_str().unwrap_or("unknown error");
-            Parsed::Error(SttError::RequestFailed(format!(
-                "OpenAI transcription failed: {message}"
-            )))
+            Parsed::Failed {
+                item_id: item_id(),
+                error: SttError::RequestFailed(format!("OpenAI transcription failed: {message}")),
+            }
         }
         Some("error") => {
             let code = value["error"]["code"].as_str().unwrap_or("");
@@ -241,8 +269,8 @@ fn parse_text_frame(text: &str) -> Parsed {
             )))
         }
         // Session/buffer/item lifecycle frames (session.created, session.updated,
-        // input_audio_buffer.committed, speech_started/stopped,
-        // conversation.item.created, rate_limits.updated, ...).
+        // speech_started/stopped, conversation.item.created,
+        // rate_limits.updated, ...).
         other => {
             tracing::debug!(frame_type = ?other, "stt openai stream: ignoring lifecycle/unknown frame");
             Parsed::Skip
@@ -270,17 +298,22 @@ impl UpstreamStream for OpenAIRealtimeStream {
     }
 
     // Cancel-safe: each loop iteration awaits a single `ws.next()` followed by
-    // synchronous parsing — nothing is held across an await; delta text is
-    // buffered internally in `partial_buf`. The close-initiation await below
-    // is guarded by `close_sent` and only reachable once `finished` is set,
-    // i.e. after the session's `stop` when `next_event` is the only branch
-    // left in its `select!` and can no longer be cancelled.
+    // synchronous parsing — nothing is held across an await; all per-item
+    // state lives on `self` (`partials`, `pending_items`), so a dropped
+    // future loses nothing. The close-initiation await below is guarded by
+    // `close_sent` and only reachable once `finished` is set, i.e. after the
+    // session's `stop` when `next_event` is the only branch left in its
+    // `select!` and can no longer be cancelled.
     async fn next_event(&mut self) -> Option<Result<UpstreamEvent, SttError>> {
         loop {
-            // Unlike Deepgram, OpenAI keeps the socket open after the commit
-            // has produced its final transcript. Initiate the close handshake
-            // exactly once so the session can observe `Closed` and emit `Done`.
-            if self.finished && self.final_delivered && !self.close_sent {
+            // Unlike Deepgram, OpenAI keeps the socket open after the last
+            // transcript. Initiate the close handshake exactly once so the
+            // session can observe `Closed` and emit `Done` — but only after
+            // the manual commit was acknowledged AND every known item has
+            // finished transcribing. Server VAD creates multiple items, and
+            // closing while the tail item is still transcribing would lose
+            // its transcript.
+            if self.finished && self.commit_acked && self.pending_items.is_empty() && !self.close_sent {
                 self.close_sent = true;
                 if let Err(e) = self.ws.close(None).await {
                     tracing::debug!(error = %e, "stt openai stream: close handshake send failed");
@@ -291,26 +324,45 @@ impl UpstreamStream for OpenAIRealtimeStream {
                 // Stream ended after a close handshake: clean shutdown.
                 None | Some(Ok(Message::Close(_))) => return Some(Ok(UpstreamEvent::Closed)),
                 Some(Ok(Message::Text(text))) => match parse_text_frame(text.as_str()) {
-                    Parsed::Delta(delta) => {
+                    Parsed::Committed { item_id } => {
+                        // Emitted per VAD speech segment and for our manual
+                        // commit; either way the item owes a transcript.
+                        self.pending_items.insert(item_id);
+                        if self.finished {
+                            self.commit_acked = true;
+                        }
+                    }
+                    Parsed::Delta { item_id, delta } => {
+                        // A delta may precede its committed event: register
+                        // the item defensively so close waits for it.
+                        self.pending_items.insert(item_id.clone());
                         if delta.is_empty() {
                             continue;
                         }
-                        self.partial_buf.push_str(&delta);
-                        return Some(Ok(UpstreamEvent::Partial(self.partial_buf.clone())));
+                        let buf = self.partials.entry(item_id).or_default();
+                        buf.push_str(&delta);
+                        return Some(Ok(UpstreamEvent::Partial(buf.clone())));
                     }
-                    Parsed::Completed(transcript) => {
-                        self.partial_buf.clear();
-                        self.final_delivered = true;
+                    Parsed::Completed { item_id, transcript } => {
+                        self.pending_items.remove(&item_id);
+                        self.partials.remove(&item_id);
                         if transcript.trim().is_empty() {
-                            continue; // nothing recognized; still counts for close tracking
+                            continue; // nothing recognized; still settles the item
                         }
                         return Some(Ok(UpstreamEvent::Final(transcript)));
                     }
+                    Parsed::Failed { item_id, error } => {
+                        self.pending_items.remove(&item_id);
+                        self.partials.remove(&item_id);
+                        return Some(Err(error));
+                    }
                     Parsed::Error(e) => return Some(Err(e)),
                     Parsed::CommitEmpty => {
-                        // The buffer held no (or too little) trailing audio:
-                        // no further transcript will arrive for the commit.
-                        self.final_delivered = true;
+                        // The manual commit found no (or too little) trailing
+                        // audio: acknowledged, and no new item was created.
+                        if self.finished {
+                            self.commit_acked = true;
+                        }
                     }
                     Parsed::Skip => {}
                 },
@@ -422,12 +474,24 @@ mod tests {
     // -- parse_text_frame -----------------------------------------------------
 
     #[test]
-    fn delta_and_completed_frames_are_decoded() {
+    fn delta_and_completed_frames_are_decoded_with_item_ids() {
         let delta = r#"{"type":"conversation.item.input_audio_transcription.delta","item_id":"i1","content_index":0,"delta":"he"}"#;
-        assert!(matches!(parse_text_frame(delta), Parsed::Delta(d) if d == "he"));
+        assert!(matches!(
+            parse_text_frame(delta),
+            Parsed::Delta { item_id, delta } if item_id == "i1" && delta == "he"
+        ));
 
         let completed = r#"{"type":"conversation.item.input_audio_transcription.completed","item_id":"i1","content_index":0,"transcript":"hello"}"#;
-        assert!(matches!(parse_text_frame(completed), Parsed::Completed(t) if t == "hello"));
+        assert!(matches!(
+            parse_text_frame(completed),
+            Parsed::Completed { item_id, transcript } if item_id == "i1" && transcript == "hello"
+        ));
+    }
+
+    #[test]
+    fn committed_frame_is_decoded_with_item_id() {
+        let frame = r#"{"type":"input_audio_buffer.committed","previous_item_id":null,"item_id":"i2"}"#;
+        assert!(matches!(parse_text_frame(frame), Parsed::Committed { item_id } if item_id == "i2"));
     }
 
     #[test]
@@ -447,8 +511,11 @@ mod tests {
     fn transcription_failed_frame_maps_to_request_failed() {
         let frame = r#"{"type":"conversation.item.input_audio_transcription.failed","item_id":"i1","error":{"type":"server_error","message":"asr down"}}"#;
         match parse_text_frame(frame) {
-            Parsed::Error(e) => assert!(e.to_string().contains("asr down"), "got: {e}"),
-            _ => panic!("expected error"),
+            Parsed::Failed { item_id, error } => {
+                assert_eq!(item_id, "i1");
+                assert!(error.to_string().contains("asr down"), "got: {error}");
+            }
+            _ => panic!("expected failed"),
         }
     }
 
@@ -463,7 +530,6 @@ mod tests {
         for frame in [
             r#"{"type":"session.created","session":{}}"#,
             r#"{"type":"session.updated","session":{}}"#,
-            r#"{"type":"input_audio_buffer.committed","item_id":"i1"}"#,
             r#"{"type":"input_audio_buffer.speech_started","audio_start_ms":10}"#,
             r#"{"type":"input_audio_buffer.speech_stopped","audio_end_ms":900}"#,
             r#"{"type":"conversation.item.created","item":{}}"#,

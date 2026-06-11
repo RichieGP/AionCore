@@ -180,18 +180,19 @@ pub(super) async fn build(
         arc.set_session_id(sid).await;
     }
 
-    // Open the ACP session eagerly so `POST /warmup` returns only after
-    // session/new (or claude-meta-resume / session/load) and the first
-    // reconcile pass have completed. Matches aionrs factory behaviour:
-    // the caller sees "warmed up" == "ready for PUT /mode | /model".
-    arc.warmup_session().await?;
-
-    let instance = AgentInstance::Acp(Arc::clone(&arc));
-
     // Hand the service the domain event receiver so it can
     // persist user intent changes without reverse-engineering
     // them from CLI observations.
     deps.acp_agent_service.attach(ctx.conversation_id, domain_rx).await;
+
+    // Open the ACP session eagerly so `POST /warmup` returns only after
+    // session/new (or claude-meta-resume / session/load) and the first
+    // reconcile pass have completed. The persistence consumer must be
+    // attached first because warmup can emit the initial SessionAssigned
+    // event synchronously while creating a native ACP session.
+    arc.warmup_session().await?;
+
+    let instance = AgentInstance::Acp(Arc::clone(&arc));
 
     Ok(instance)
 }

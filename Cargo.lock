@@ -760,6 +760,7 @@ dependencies = [
  "aionui-system",
  "async-trait",
  "axum",
+ "base64",
  "futures-util",
  "http-body-util",
  "open",

@@ -1003,7 +1003,6 @@ impl ConversationService {
             None if definition.default_mcps_mode == "fixed" => {
                 parse_json_string_list(Some(definition.default_mcp_ids.as_str()), "default_mcp_ids")?
             }
-            None if definition.default_mcps_mode == "unset" => Vec::new(),
             None => preference
                 .as_ref()
                 .map(|row| parse_json_string_list(Some(row.last_mcp_ids.as_str()), "last_mcp_ids"))
@@ -1141,6 +1140,51 @@ impl ConversationService {
             })
             .await
             .map_err(|e| ConversationError::internal(format!("assistant preference upsert failed: {e}")))?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn persist_runtime_assistant_snapshot(
+        &self,
+        conversation_id: &str,
+        updates: AssistantRuntimePreferenceUpdate<'_>,
+    ) -> Result<(), ConversationError> {
+        let Some(snapshot) = self
+            .conversation_repo
+            .get_assistant_snapshot(conversation_id)
+            .await
+            .map_err(|e| {
+                ConversationError::internal(format!(
+                    "Failed to load persisted assistant snapshot for runtime sync: {e}"
+                ))
+            })?
+        else {
+            return Ok(());
+        };
+
+        self.conversation_repo
+            .upsert_assistant_snapshot(&UpsertConversationAssistantSnapshotParams {
+                conversation_id: &snapshot.conversation_id,
+                assistant_definition_id: &snapshot.assistant_definition_id,
+                assistant_key: &snapshot.assistant_key,
+                assistant_source: &snapshot.assistant_source,
+                assistant_name: &snapshot.assistant_name,
+                assistant_avatar_type: &snapshot.assistant_avatar_type,
+                assistant_avatar_value: snapshot.assistant_avatar_value.as_deref(),
+                agent_backend: &snapshot.agent_backend,
+                rules_content: &snapshot.rules_content,
+                default_model_mode: &snapshot.default_model_mode,
+                resolved_model_id: updates.model.or(snapshot.resolved_model_id.as_deref()),
+                default_permission_mode: &snapshot.default_permission_mode,
+                resolved_permission_value: updates.permission.or(snapshot.resolved_permission_value.as_deref()),
+                default_skills_mode: &snapshot.default_skills_mode,
+                resolved_skill_ids: &snapshot.resolved_skill_ids,
+                resolved_disabled_builtin_skill_ids: &snapshot.resolved_disabled_builtin_skill_ids,
+                default_mcps_mode: &snapshot.default_mcps_mode,
+                resolved_mcp_ids: &snapshot.resolved_mcp_ids,
+            })
+            .await
+            .map_err(|e| ConversationError::internal(format!("assistant snapshot upsert failed: {e}")))?;
 
         Ok(())
     }
@@ -1483,6 +1527,14 @@ impl ConversationService {
 
         if let Some(model) = req.model.as_ref() {
             let selected_model = model.use_model.as_deref().unwrap_or(model.model.as_str());
+            self.persist_runtime_assistant_snapshot(
+                id,
+                AssistantRuntimePreferenceUpdate {
+                    model: Some(selected_model),
+                    ..Default::default()
+                },
+            )
+            .await?;
             self.persist_runtime_assistant_preferences(
                 id,
                 AssistantRuntimePreferenceUpdate {

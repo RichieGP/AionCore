@@ -41,6 +41,14 @@ impl ConversationService {
         }
         let task = self.task(conversation_id)?;
         task.set_mode(&req.mode).await.map_err(ConversationError::from)?;
+        self.persist_runtime_assistant_snapshot(
+            conversation_id,
+            crate::service::AssistantRuntimePreferenceUpdate {
+                permission: Some(&req.mode),
+                ..Default::default()
+            },
+        )
+        .await?;
         self.persist_runtime_assistant_preferences(
             conversation_id,
             crate::service::AssistantRuntimePreferenceUpdate {
@@ -83,9 +91,18 @@ impl ConversationService {
                 return Err(err);
             }
         };
-        task.set_model_confirmed(&req.model_id)
+        let response = task
+            .set_model_confirmed(&req.model_id)
             .await
             .map_err(ConversationError::from)?;
+        self.persist_runtime_assistant_snapshot(
+            conversation_id,
+            crate::service::AssistantRuntimePreferenceUpdate {
+                model: Some(&req.model_id),
+                ..Default::default()
+            },
+        )
+        .await?;
         self.persist_runtime_assistant_preferences(
             conversation_id,
             crate::service::AssistantRuntimePreferenceUpdate {
@@ -94,7 +111,7 @@ impl ConversationService {
             },
         )
         .await?;
-        task.get_model().await.map_err(ConversationError::from)
+        Ok(response)
     }
 
     // ── Usage / Slash commands ──────────────────────────────────────

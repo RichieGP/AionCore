@@ -42,10 +42,10 @@ CREATE TABLE IF NOT EXISTS assistant_definitions (
     recommended_prompts                TEXT    NOT NULL DEFAULT '[]',
     recommended_prompts_i18n           TEXT    NOT NULL DEFAULT '{}',
     default_model_mode                 TEXT    NOT NULL
-                                               CHECK (default_model_mode IN ('unset', 'auto', 'fixed')),
+                                               CHECK (default_model_mode IN ('auto', 'fixed')),
     default_model_value                TEXT,
     default_permission_mode            TEXT    NOT NULL
-                                               CHECK (default_permission_mode IN ('unset', 'auto', 'fixed')),
+                                               CHECK (default_permission_mode IN ('auto', 'fixed')),
     default_permission_value           TEXT,
     default_skills_mode                TEXT    NOT NULL
                                                CHECK (default_skills_mode IN ('auto', 'fixed')),
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS assistant_definitions (
     custom_skill_names                 TEXT    NOT NULL DEFAULT '[]',
     default_disabled_builtin_skill_ids TEXT    NOT NULL DEFAULT '[]',
     default_mcps_mode                  TEXT    NOT NULL
-                                               CHECK (default_mcps_mode IN ('unset', 'auto', 'fixed')),
+                                               CHECK (default_mcps_mode IN ('auto', 'fixed')),
     default_mcp_ids                    TEXT    NOT NULL DEFAULT '[]',
     created_at                         INTEGER NOT NULL,
     updated_at                         INTEGER NOT NULL,
@@ -121,17 +121,17 @@ CREATE TABLE IF NOT EXISTS conversation_assistant_snapshots (
     agent_backend                          TEXT    NOT NULL,
     rules_content                          TEXT    NOT NULL DEFAULT '',
     default_model_mode                     TEXT    NOT NULL
-                                                   CHECK (default_model_mode IN ('unset', 'auto', 'fixed')),
+                                                   CHECK (default_model_mode IN ('auto', 'fixed')),
     resolved_model_id                      TEXT,
     default_permission_mode                TEXT    NOT NULL
-                                                   CHECK (default_permission_mode IN ('unset', 'auto', 'fixed')),
+                                                   CHECK (default_permission_mode IN ('auto', 'fixed')),
     resolved_permission_value              TEXT,
     default_skills_mode                    TEXT    NOT NULL
                                                    CHECK (default_skills_mode IN ('auto', 'fixed')),
     resolved_skill_ids                     TEXT    NOT NULL DEFAULT '[]',
     resolved_disabled_builtin_skill_ids    TEXT    NOT NULL DEFAULT '[]',
     default_mcps_mode                      TEXT    NOT NULL
-                                                   CHECK (default_mcps_mode IN ('unset', 'auto', 'fixed')),
+                                                   CHECK (default_mcps_mode IN ('auto', 'fixed')),
     resolved_mcp_ids                       TEXT    NOT NULL DEFAULT '[]',
     created_at                             INTEGER NOT NULL,
     updated_at                             INTEGER NOT NULL,

@@ -809,7 +809,7 @@ async fn upsert_test_assistant_definition(
         default_skill_ids: "[]",
         custom_skill_names: "[]",
         default_disabled_builtin_skill_ids: "[]",
-        default_mcps_mode: "unset",
+        default_mcps_mode: "auto",
         default_mcp_ids: "[]",
     })
     .await
@@ -2378,7 +2378,7 @@ async fn set_model_returns_confirmed_model_even_if_get_model_is_stale() {
 #[tokio::test]
 async fn set_model_updates_assistant_preference_only_when_snapshot_model_mode_is_auto() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
     upsert_test_assistant_definition(
@@ -2387,7 +2387,7 @@ async fn set_model_updates_assistant_preference_only_when_snapshot_model_mode_is
         "assistant-model-auto",
         "claude",
         "auto",
-        "unset",
+        "auto",
     )
     .await;
     overlay_repo
@@ -2437,6 +2437,8 @@ async fn set_model_updates_assistant_preference_only_when_snapshot_model_mode_is
     );
     let auto_pref = preference_repo.get("asstdef_model_auto").await.unwrap().unwrap();
     assert_eq!(auto_pref.last_model_id.as_deref(), Some("model-b"));
+    let auto_snapshot = repo.get_assistant_snapshot(&auto_conv.id).await.unwrap().unwrap();
+    assert_eq!(auto_snapshot.resolved_model_id.as_deref(), Some("model-b"));
 
     upsert_test_assistant_definition(
         &definition_repo,
@@ -2444,7 +2446,7 @@ async fn set_model_updates_assistant_preference_only_when_snapshot_model_mode_is
         "assistant-model-fixed",
         "claude",
         "fixed",
-        "unset",
+        "auto",
     )
     .await;
     overlay_repo
@@ -2488,12 +2490,14 @@ async fn set_model_updates_assistant_preference_only_when_snapshot_model_mode_is
 
     let fixed_pref = preference_repo.get("asstdef_model_fixed").await.unwrap().unwrap();
     assert_eq!(fixed_pref.last_model_id.as_deref(), Some("legacy-fixed-model"));
+    let fixed_snapshot = repo.get_assistant_snapshot(&fixed_conv.id).await.unwrap().unwrap();
+    assert_eq!(fixed_snapshot.resolved_model_id.as_deref(), Some("model-c"));
 }
 
 #[tokio::test]
 async fn set_mode_updates_assistant_preference_only_when_snapshot_permission_mode_is_auto() {
     let task_mgr = Arc::new(MockTaskManager::new());
-    let (svc, _broadcaster, _repo, definition_repo, overlay_repo, preference_repo) =
+    let (svc, _broadcaster, repo, definition_repo, overlay_repo, preference_repo) =
         make_service_with_mock_task_manager_and_assistant_support(task_mgr.clone()).await;
 
     upsert_test_assistant_definition(
@@ -2501,7 +2505,7 @@ async fn set_mode_updates_assistant_preference_only_when_snapshot_permission_mod
         "asstdef_mode_auto",
         "assistant-mode-auto",
         "claude",
-        "unset",
+        "auto",
         "auto",
     )
     .await;
@@ -2546,13 +2550,15 @@ async fn set_mode_updates_assistant_preference_only_when_snapshot_permission_mod
     assert_eq!(response.mode, "plan");
     let auto_pref = preference_repo.get("asstdef_mode_auto").await.unwrap().unwrap();
     assert_eq!(auto_pref.last_permission_value.as_deref(), Some("plan"));
+    let auto_snapshot = repo.get_assistant_snapshot(&auto_conv.id).await.unwrap().unwrap();
+    assert_eq!(auto_snapshot.resolved_permission_value.as_deref(), Some("plan"));
 
     upsert_test_assistant_definition(
         &definition_repo,
         "asstdef_mode_fixed",
         "assistant-mode-fixed",
         "claude",
-        "unset",
+        "auto",
         "fixed",
     )
     .await;
@@ -2597,6 +2603,8 @@ async fn set_mode_updates_assistant_preference_only_when_snapshot_permission_mod
 
     let fixed_pref = preference_repo.get("asstdef_mode_fixed").await.unwrap().unwrap();
     assert_eq!(fixed_pref.last_permission_value.as_deref(), Some("legacy-fixed-mode"));
+    let fixed_snapshot = repo.get_assistant_snapshot(&fixed_conv.id).await.unwrap().unwrap();
+    assert_eq!(fixed_snapshot.resolved_permission_value.as_deref(), Some("acceptEdits"));
 }
 
 #[tokio::test]
@@ -2611,7 +2619,7 @@ async fn update_aionrs_model_updates_assistant_preference_only_when_snapshot_mod
         "assistant-aionrs-auto",
         "aionrs",
         "auto",
-        "unset",
+        "auto",
     )
     .await;
     overlay_repo
@@ -2663,6 +2671,8 @@ async fn update_aionrs_model_updates_assistant_preference_only_when_snapshot_mod
     );
     let auto_pref = preference_repo.get("asstdef_aionrs_auto").await.unwrap().unwrap();
     assert_eq!(auto_pref.last_model_id.as_deref(), Some("model-z"));
+    let auto_snapshot = repo.get_assistant_snapshot(&auto_conv.id).await.unwrap().unwrap();
+    assert_eq!(auto_snapshot.resolved_model_id.as_deref(), Some("model-z"));
 
     upsert_test_assistant_definition(
         &definition_repo,
@@ -2670,7 +2680,7 @@ async fn update_aionrs_model_updates_assistant_preference_only_when_snapshot_mod
         "assistant-aionrs-fixed",
         "aionrs",
         "fixed",
-        "unset",
+        "auto",
     )
     .await;
     overlay_repo
@@ -2718,6 +2728,8 @@ async fn update_aionrs_model_updates_assistant_preference_only_when_snapshot_mod
 
     let fixed_pref = preference_repo.get("asstdef_aionrs_fixed").await.unwrap().unwrap();
     assert_eq!(fixed_pref.last_model_id.as_deref(), Some("legacy-aionrs-fixed-model"));
+    let fixed_snapshot = repo.get_assistant_snapshot(&fixed_conv.id).await.unwrap().unwrap();
+    assert_eq!(fixed_snapshot.resolved_model_id.as_deref(), Some("model-y"));
 
     // Ensure the update path used the repository row, not a no-op.
     let updated_row = repo.get(&fixed_conv.id).await.unwrap().unwrap();
@@ -4092,12 +4104,12 @@ async fn create_does_not_overwrite_preferences_for_fixed_skills_and_mcps() {
 }
 
 #[tokio::test]
-async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() {
+async fn create_with_auto_builtin_defaults_without_preferences_keeps_snapshot_values_empty() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
     let dispatcher = Arc::new(StaticAssistantDispatcher {
-        rules: std::collections::HashMap::from([("preset-unset".to_string(), "assistant rule body".to_string())]),
+        rules: std::collections::HashMap::from([("preset-auto".to_string(), "assistant rule body".to_string())]),
     });
     let (svc, _broadcaster, _repo, definition_repo, state_repo, preference_repo) =
         make_service_with_assistant_support(resolver, dispatcher).await;
@@ -4105,11 +4117,11 @@ async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() 
 
     definition_repo
         .upsert(&UpsertAssistantDefinitionParams {
-            definition_id: "asstdef_preset_unset",
-            assistant_key: "preset-unset",
+            definition_id: "asstdef_preset_auto",
+            assistant_key: "preset-auto",
             source: "builtin",
             owner_type: "system",
-            source_ref: Some("preset-unset"),
+            source_ref: Some("preset-auto"),
             source_version: None,
             source_hash: None,
             name: "Preset Unset",
@@ -4120,26 +4132,26 @@ async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() 
             avatar_value: Some("🤖"),
             agent_backend: "claude",
             rule_resource_type: "builtin_asset",
-            rule_resource_ref: Some("preset-unset"),
+            rule_resource_ref: Some("preset-auto"),
             rule_inline_content: None,
             recommended_prompts: "[]",
             recommended_prompts_i18n: "{}",
-            default_model_mode: "unset",
+            default_model_mode: "auto",
             default_model_value: None,
-            default_permission_mode: "unset",
+            default_permission_mode: "auto",
             default_permission_value: None,
             default_skills_mode: "fixed",
             default_skill_ids: r#"["pdf"]"#,
             custom_skill_names: "[]",
             default_disabled_builtin_skill_ids: "[]",
-            default_mcps_mode: "unset",
+            default_mcps_mode: "auto",
             default_mcp_ids: "[]",
         })
         .await
         .unwrap();
     state_repo
         .upsert(&UpsertAssistantOverlayParams {
-            definition_id: "asstdef_preset_unset",
+            definition_id: "asstdef_preset_auto",
             enabled: true,
             sort_order: 0,
             agent_backend_override: Some("codex"),
@@ -4149,12 +4161,12 @@ async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() 
         .unwrap();
     preference_repo
         .upsert(&UpsertAssistantPreferenceParams {
-            definition_id: "asstdef_preset_unset",
-            last_model_id: Some("legacy-model"),
-            last_permission_value: Some("workspace-write"),
-            last_skill_ids: r#"["legacy-skill"]"#,
-            last_disabled_builtin_skill_ids: r#"["legacy-disabled"]"#,
-            last_mcp_ids: r#"["legacy-mcp"]"#,
+            definition_id: "asstdef_preset_auto",
+            last_model_id: None,
+            last_permission_value: None,
+            last_skill_ids: "[]",
+            last_disabled_builtin_skill_ids: "[]",
+            last_mcp_ids: "[]",
         })
         .await
         .unwrap();
@@ -4165,7 +4177,7 @@ async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() 
         "extra": {
             "workspace": workspace,
             "backend": "claude",
-            "assistant_id": "preset-unset",
+            "assistant_id": "preset-auto",
             "assistant_locale": "zh-CN"
         },
     }))
@@ -4176,10 +4188,10 @@ async fn create_with_unset_builtin_defaults_does_not_resolve_from_preferences() 
     assert!(resp.extra.get("permission_mode").is_none());
     assert!(resp.extra.get("assistant_snapshot").is_none());
 
-    let updated_pref = preference_repo.get("asstdef_preset_unset").await.unwrap().unwrap();
-    assert_eq!(updated_pref.last_model_id.as_deref(), Some("legacy-model"));
-    assert_eq!(updated_pref.last_permission_value.as_deref(), Some("workspace-write"));
-    assert_eq!(updated_pref.last_mcp_ids, r#"["legacy-mcp"]"#);
+    let updated_pref = preference_repo.get("asstdef_preset_auto").await.unwrap().unwrap();
+    assert_eq!(updated_pref.last_model_id, None);
+    assert_eq!(updated_pref.last_permission_value, None);
+    assert_eq!(updated_pref.last_mcp_ids, "[]");
 }
 
 #[tokio::test]

@@ -98,8 +98,8 @@ async fn assistant_definition_table_rejects_extension_source_and_owner_type() {
             'd-ext-source', 'ext-source', 'extension', 'system', 'ext-source',
             'Ext Source', '{}', '{}', 'none', 'aionrs',
             'none', '[]', '{}',
-            'unset', 'unset', 'fixed', '[]',
-            '[]', '[]', 'unset', '[]',
+            'auto', 'auto', 'fixed', '[]',
+            '[]', '[]', 'auto', '[]',
             1, 1
         )
         "#,
@@ -122,8 +122,8 @@ async fn assistant_definition_table_rejects_extension_source_and_owner_type() {
             'd-ext-owner', 'ext-owner', 'builtin', 'extension', 'ext-owner',
             'Ext Owner', '{}', '{}', 'none', 'aionrs',
             'none', '[]', '{}',
-            'unset', 'unset', 'fixed', '[]',
-            '[]', '[]', 'unset', '[]',
+            'auto', 'auto', 'fixed', '[]',
+            '[]', '[]', 'auto', '[]',
             1, 1
         )
         "#,

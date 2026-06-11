@@ -145,15 +145,15 @@ impl AssistantService {
                     rule_inline_content: None,
                     recommended_prompts: &recommended_prompts,
                     recommended_prompts_i18n: &recommended_prompts_i18n,
-                    default_model_mode: "unset",
+                    default_model_mode: "auto",
                     default_model_value: None,
-                    default_permission_mode: "unset",
+                    default_permission_mode: "auto",
                     default_permission_value: None,
                     default_skills_mode: "fixed",
                     default_skill_ids: &default_skill_ids,
                     custom_skill_names: &custom_skill_names,
                     default_disabled_builtin_skill_ids: &default_disabled_builtin_skill_ids,
-                    default_mcps_mode: "unset",
+                    default_mcps_mode: "auto",
                     default_mcp_ids: "[]",
                 })
                 .await
@@ -234,15 +234,15 @@ impl AssistantService {
                 rule_inline_content: None,
                 recommended_prompts: &recommended_prompts,
                 recommended_prompts_i18n: &recommended_prompts_i18n,
-                default_model_mode: "unset",
+                default_model_mode: "auto",
                 default_model_value: None,
-                default_permission_mode: "unset",
+                default_permission_mode: "auto",
                 default_permission_value: None,
                 default_skills_mode: "fixed",
                 default_skill_ids: &default_skill_ids,
                 custom_skill_names: &custom_skill_names,
                 default_disabled_builtin_skill_ids: &default_disabled_builtin_skill_ids,
-                default_mcps_mode: "unset",
+                default_mcps_mode: "auto",
                 default_mcp_ids: "[]",
             })
             .await
@@ -272,9 +272,9 @@ impl AssistantService {
 
         let mut patched = existing.clone();
         if reset_model_and_permission {
-            patched.default_model_mode = "unset".to_string();
+            patched.default_model_mode = "auto".to_string();
             patched.default_model_value = None;
-            patched.default_permission_mode = "unset".to_string();
+            patched.default_permission_mode = "auto".to_string();
             patched.default_permission_value = None;
         }
         if let Some(value) = overrides.recommended_prompts.as_deref() {
@@ -1569,7 +1569,6 @@ fn validate_scalar_default(
     field_name: &str,
 ) -> Result<(String, Option<String>), AssistantError> {
     match value.mode.as_str() {
-        "unset" => Ok(("unset".into(), None)),
         "auto" => Ok(("auto".into(), None)),
         "fixed" => {
             let fixed = value.value.clone().filter(|v| !v.trim().is_empty()).ok_or_else(|| {
@@ -1578,7 +1577,7 @@ fn validate_scalar_default(
             Ok(("fixed".into(), Some(fixed)))
         }
         other => Err(AssistantError::BadRequest(format!(
-            "{field_name}.mode must be 'unset', 'auto' or 'fixed', got '{other}'"
+            "{field_name}.mode must be 'auto' or 'fixed', got '{other}'"
         ))),
     }
 }
@@ -1588,7 +1587,6 @@ fn validate_list_default(
     field_name: &str,
 ) -> Result<(String, String), AssistantError> {
     match value.mode.as_str() {
-        "unset" => Ok(("unset".into(), "[]".into())),
         "auto" => Ok(("auto".into(), "[]".into())),
         "fixed" => Ok((
             "fixed".into(),
@@ -1596,7 +1594,7 @@ fn validate_list_default(
                 .map_err(|e| AssistantError::Internal(format!("encode {field_name}: {e}")))?,
         )),
         other => Err(AssistantError::BadRequest(format!(
-            "{field_name}.mode must be 'unset', 'auto' or 'fixed', got '{other}'"
+            "{field_name}.mode must be 'auto' or 'fixed', got '{other}'"
         ))),
     }
 }
@@ -2154,22 +2152,22 @@ mod tests {
 
         let detail = fx.service.get_detail("builtin-office", Some("en-US")).await.unwrap();
         assert_eq!(detail.engine.agent_backend, "claude");
-        assert_eq!(detail.defaults.model.mode, "unset");
+        assert_eq!(detail.defaults.model.mode, "auto");
         assert_eq!(detail.defaults.model.value, None);
-        assert_eq!(detail.defaults.permission.mode, "unset");
+        assert_eq!(detail.defaults.permission.mode, "auto");
         assert_eq!(detail.defaults.permission.value, None);
     }
 
     #[tokio::test]
-    async fn builtin_detail_defaults_start_unset_for_model_permission_and_mcps() {
+    async fn builtin_detail_defaults_start_auto_for_model_permission_and_mcps() {
         let fx = fixture_with_builtins(vec![mk_builtin("builtin-office", "Office")]).await;
 
         let detail = fx.service.get_detail("builtin-office", Some("en-US")).await.unwrap();
-        assert_eq!(detail.defaults.model.mode, "unset");
+        assert_eq!(detail.defaults.model.mode, "auto");
         assert_eq!(detail.defaults.model.value, None);
-        assert_eq!(detail.defaults.permission.mode, "unset");
+        assert_eq!(detail.defaults.permission.mode, "auto");
         assert_eq!(detail.defaults.permission.value, None);
-        assert_eq!(detail.defaults.mcps.mode, "unset");
+        assert_eq!(detail.defaults.mcps.mode, "auto");
         assert!(detail.defaults.mcps.value.is_empty());
     }
 
@@ -2236,14 +2234,14 @@ mod tests {
 
         let detail = fx.service.get_detail("u1", Some("en-US")).await.unwrap();
         assert_eq!(detail.engine.agent_backend, "codex");
-        assert_eq!(detail.defaults.model.mode, "unset");
+        assert_eq!(detail.defaults.model.mode, "auto");
         assert_eq!(detail.defaults.model.value, None);
-        assert_eq!(detail.defaults.permission.mode, "unset");
+        assert_eq!(detail.defaults.permission.mode, "auto");
         assert_eq!(detail.defaults.permission.value, None);
     }
 
     #[tokio::test]
-    async fn create_user_without_governance_defaults_starts_unset() {
+    async fn create_user_without_governance_defaults_starts_auto() {
         let fx = fixture().await;
         fx.service
             .create(CreateAssistantRequest {
@@ -2255,9 +2253,9 @@ mod tests {
             .unwrap();
 
         let detail = fx.service.get_detail("u1", Some("en-US")).await.unwrap();
-        assert_eq!(detail.defaults.model.mode, "unset");
-        assert_eq!(detail.defaults.permission.mode, "unset");
-        assert_eq!(detail.defaults.mcps.mode, "unset");
+        assert_eq!(detail.defaults.model.mode, "auto");
+        assert_eq!(detail.defaults.permission.mode, "auto");
+        assert_eq!(detail.defaults.mcps.mode, "auto");
     }
 
     #[tokio::test]

@@ -25,8 +25,9 @@ use aionui_extension::{
 };
 use aionui_file::{BrowseRoots, FileRouterState, FileService, FileWatchService, SnapshotService};
 use aionui_mcp::{
-    AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter,
-    McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter, QwenAdapter,
+    AionrsAdapter, AionuiAdapter, ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, CursorAdapter, GeminiAdapter,
+    McpAgentAdapter, McpConfigService, McpConnectionTestService, McpRouterState, McpSyncService, OpencodeAdapter,
+    QwenAdapter,
 };
 use aionui_office::{
     ConversionService, OfficeRouterState, OfficecliWatchManager, ProxyService,
@@ -404,6 +405,7 @@ pub fn build_mcp_state(services: &AppServices) -> McpRouterState {
 
     let adapters: Vec<Arc<dyn McpAgentAdapter>> = vec![
         Arc::new(ClaudeAdapter),
+        Arc::new(CursorAdapter),
         Arc::new(GeminiAdapter),
         Arc::new(QwenAdapter),
         Arc::new(CodexAdapter),

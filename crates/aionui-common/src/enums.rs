@@ -274,6 +274,7 @@ pub enum FileChangeOperation {
 #[serde(rename_all = "lowercase")]
 pub enum McpSource {
     Claude,
+    Cursor,
     Gemini,
     Qwen,
     Codex,
@@ -434,6 +435,7 @@ mod tests {
     fn test_mcp_source_serde_roundtrip() {
         let cases = [
             (McpSource::Claude, r#""claude""#),
+            (McpSource::Cursor, r#""cursor""#),
             (McpSource::Gemini, r#""gemini""#),
             (McpSource::Qwen, r#""qwen""#),
             (McpSource::Codex, r#""codex""#),

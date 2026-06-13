@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_types)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
 
 use axum::Router;
@@ -19,6 +19,7 @@ use aionui_common::{ApiError, now_ms};
 
 use crate::asset_paths::normalize_relative_asset_path;
 use crate::error::ExtensionError;
+use crate::kodo_discovery::discover_kodo_acp_adapters;
 use crate::permission::{build_permission_summary, calculate_risk_level};
 use crate::registry::ExtensionRegistry;
 
@@ -195,7 +196,13 @@ async fn get_assistants(
 async fn get_acp_adapters(
     State(state): State<ExtensionRouterState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
-    let adapters = state.registry.get_acp_adapters().await;
+    let mut adapters = state.registry.get_acp_adapters().await;
+    let mut seen_ids: HashSet<String> = adapters.iter().map(|adapter| adapter.id.clone()).collect();
+    for adapter in discover_kodo_acp_adapters().await {
+        if seen_ids.insert(adapter.id.clone()) {
+            adapters.push(adapter);
+        }
+    }
     let value = serde_json::Value::Array(
         adapters
             .into_iter()

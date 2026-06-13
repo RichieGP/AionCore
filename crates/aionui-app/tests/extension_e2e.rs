@@ -431,18 +431,20 @@ async fn eq15_legacy_acp_skill_and_mcp_endpoints_preserve_contract() {
     assert_eq!(acp_resp.status(), StatusCode::OK);
     let acp_json = body_json(acp_resp).await;
     let adapters = acp_json["data"].as_array().unwrap();
-    assert_eq!(adapters.len(), 1);
-    assert_eq!(adapters[0]["id"], "legacy-acp");
-    assert_eq!(adapters[0]["cliCommand"], "legacy-cli");
-    assert_eq!(adapters[0]["defaultCliPath"], "legacy-cli");
-    assert_eq!(adapters[0]["connectionType"], "cli");
-    assert_eq!(adapters[0]["supportsStreaming"], false);
-    assert_eq!(adapters[0]["yoloMode"]["type"], "session");
+    let legacy_adapter = adapters
+        .iter()
+        .find(|adapter| adapter["id"] == "legacy-acp")
+        .expect("legacy ACP adapter contribution must remain present");
+    assert_eq!(legacy_adapter["cliCommand"], "legacy-cli");
+    assert_eq!(legacy_adapter["defaultCliPath"], "legacy-cli");
+    assert_eq!(legacy_adapter["connectionType"], "cli");
+    assert_eq!(legacy_adapter["supportsStreaming"], false);
+    assert_eq!(legacy_adapter["yoloMode"]["type"], "session");
     assert_eq!(
-        adapters[0]["avatar"],
+        legacy_adapter["avatar"],
         "/api/extensions/legacy-suite/assets/assets/adapter.png"
     );
-    assert_eq!(adapters[0]["_extensionName"], "legacy-suite");
+    assert_eq!(legacy_adapter["_extensionName"], "legacy-suite");
 
     let mcp_resp = app
         .oneshot(get_with_token("/api/extensions/mcp-servers", &token))

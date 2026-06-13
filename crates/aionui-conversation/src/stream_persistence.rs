@@ -479,6 +479,7 @@ impl StreamPersistenceAdapter {
 
         let mut value = serde_json::to_value(data).unwrap_or_default();
         normalize_keys_to_snake_case(&mut value);
+        enrich_acp_tool_call_display_fields(&mut value);
         let content = value.to_string();
 
         match data.update.session_update {
@@ -629,5 +630,112 @@ impl StreamPersistenceAdapter {
                 error!(error = %ErrorChain(&e), "Failed to persist tool_group message");
             }
         }
+    }
+}
+
+fn enrich_acp_tool_call_display_fields(value: &mut serde_json::Value) {
+    let Some(update) = value.get_mut("update").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let title = update
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let derived_tool_name = derive_acp_tool_name(update);
+    if let Some(tool_name) = derived_tool_name.as_deref() {
+        update
+            .entry("tool_name".to_owned())
+            .or_insert_with(|| serde_json::Value::String(tool_name.to_owned()));
+    }
+    if is_generic_mcp_title(&title)
+        && let Some(tool_name) = derived_tool_name
+    {
+        let server = derive_acp_mcp_server_name(update);
+        let display = match server {
+            Some(server) => format!("{server}: {tool_name}"),
+            None => tool_name,
+        };
+        update.insert("display_title".to_owned(), serde_json::Value::String(display));
+    }
+}
+
+fn is_generic_mcp_title(title: &str) -> bool {
+    matches!(
+        title.trim().to_ascii_lowercase().as_str(),
+        "mcp: tool" | "mcp tool" | "tool"
+    )
+}
+
+fn derive_acp_tool_name(update: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for key in ["tool_name", "name", "tool", "mcp_tool", "mcp_tool_name"] {
+        if let Some(value) = update.get(key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+            return Some(value.to_owned());
+        }
+    }
+    for parent in ["raw_input", "raw_output"] {
+        if let Some(value) = update.get(parent).and_then(find_tool_name_in_value) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn derive_acp_mcp_server_name(update: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    for parent in ["raw_input", "raw_output"] {
+        if let Some(value) = update.get(parent).and_then(find_server_name_in_value) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn find_tool_name_in_value(value: &serde_json::Value) -> Option<String> {
+    find_string_by_keys(
+        value,
+        &[
+            "tool_name",
+            "toolName",
+            "name",
+            "tool",
+            "mcp_tool",
+            "mcpTool",
+            "mcp_tool_name",
+            "mcpToolName",
+        ],
+    )
+}
+
+fn find_server_name_in_value(value: &serde_json::Value) -> Option<String> {
+    find_string_by_keys(
+        value,
+        &[
+            "server_name",
+            "serverName",
+            "mcp_server",
+            "mcpServer",
+            "mcp_server_name",
+            "mcpServerName",
+        ],
+    )
+}
+
+fn find_string_by_keys(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                    return Some(value.to_owned());
+                }
+            }
+            for value in map.values() {
+                if let Some(found) = find_string_by_keys(value, keys) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(|item| find_string_by_keys(item, keys)),
+        _ => None,
     }
 }

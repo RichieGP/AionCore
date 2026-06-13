@@ -1,3 +1,4 @@
+use crate::capability::cli_process::CliAgentProcess;
 use crate::capability::team_guide_prompt;
 use crate::shared_kernel::PersistedSessionState;
 use agent_client_protocol::schema::{EnvVariable, McpServer, McpServerStdio, NewSessionRequest};
@@ -5,6 +6,7 @@ use aionui_api_types::AgentMetadata;
 use aionui_api_types::{AcpBuildExtra, GuideMcpConfig, TEAM_MCP_SERVER_NAME, TeamMcpStdioConfig};
 use aionui_common::CommandSpec;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use aionui_common::constants::TEAM_CAPABLE_BACKENDS;
 
@@ -21,7 +23,7 @@ pub struct WorkspaceInfo {
 /// `AcpAgentManager` reads from this but never mutates it. By front-loading
 /// the decision logic (which MCP servers to inject, what preset context to
 /// compose) we keep the manager focused on execution + state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpSessionParams {
     pub conversation_id: String,
     pub workspace: WorkspaceInfo,
@@ -29,6 +31,7 @@ pub struct AcpSessionParams {
     pub command_spec: CommandSpec,
     pub config: AcpBuildExtra,
     pub mcp_servers: Vec<McpServer>,
+    pub mcp_proxy_processes: Vec<Arc<CliAgentProcess>>,
     pub preset_context: Option<String>,
     pub session_snapshot: Option<PersistedSessionState>,
     /// Backend data directory (`AppConfig.data_dir`). Passed through to
@@ -66,6 +69,7 @@ pub async fn assemble_acp_params(
     command_spec: CommandSpec,
     config: AcpBuildExtra,
     user_mcp_servers: Vec<McpServer>,
+    mcp_proxy_processes: Vec<Arc<CliAgentProcess>>,
     mcp_awareness_context: Option<String>,
     session_snapshot: Option<PersistedSessionState>,
     data_dir: PathBuf,
@@ -85,6 +89,7 @@ pub async fn assemble_acp_params(
         command_spec,
         config,
         mcp_servers,
+        mcp_proxy_processes,
         preset_context,
         session_snapshot,
         data_dir,

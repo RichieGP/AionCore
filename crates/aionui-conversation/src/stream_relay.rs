@@ -1376,9 +1376,11 @@ mod tests {
                 session_update: AcpToolCallSessionUpdateKind::ToolCall,
                 tool_call_id: "atc-001".into(),
                 status: Some(AcpToolCallStatus::InProgress),
-                title: Some("Bash".into()),
+                title: Some("MCP: tool".into()),
                 kind: None,
-                raw_input: Some(json!({"command": "mv /tmp/a /tmp/b", "description": "Move file"})),
+                raw_input: Some(
+                    json!({"server_name": "kodo-searcher", "tool_name": "coding_threads_search", "query": "mcp"}),
+                ),
                 raw_output: None,
                 content: None,
                 locations: None,
@@ -1432,11 +1434,19 @@ mod tests {
             update_obj
                 .get("raw_input")
                 .unwrap()
-                .get("command")
+                .get("tool_name")
                 .unwrap()
                 .as_str()
                 .unwrap(),
-            "mv /tmp/a /tmp/b"
+            "coding_threads_search"
+        );
+        assert_eq!(
+            update_obj.get("tool_name").and_then(|v| v.as_str()),
+            Some("coding_threads_search")
+        );
+        assert_eq!(
+            update_obj.get("display_title").and_then(|v| v.as_str()),
+            Some("kodo-searcher: coding_threads_search")
         );
         assert!(
             update_obj.get("raw_output").is_some(),

@@ -900,11 +900,25 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
         }
 
         let process = Arc::clone(&self.process);
+        let proxy_processes = self.params.mcp_proxy_processes.clone();
         let grace = Duration::from_millis(ACP_KILL_GRACE_MS);
         let conversation_id = self.params.conversation_id.clone();
         let pid = process.pid();
 
         tokio::spawn(async move {
+            for proxy in proxy_processes {
+                let proxy_pid = proxy.pid();
+                if let Err(e) = proxy.kill(grace).await {
+                    error!(
+                        %conversation_id,
+                        pid = proxy_pid,
+                        error = %ErrorChain(&e),
+                        "Failed to kill MCP proxy process"
+                    );
+                } else {
+                    debug!(%conversation_id, pid = proxy_pid, "MCP proxy process kill completed");
+                }
+            }
             if let Err(e) = process.kill(grace).await {
                 // Tag the failure with conversation_id + pid so Sentry can
                 // group these and ops can correlate with the matching
@@ -953,8 +967,12 @@ impl AcpAgentManager {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let _ = crate::agent_task::IAgentTask::kill(self, reason);
         let process = Arc::clone(&self.process);
+        let proxy_processes = self.params.mcp_proxy_processes.clone();
         let grace = Duration::from_millis(ACP_KILL_GRACE_MS);
         Box::pin(async move {
+            for proxy in proxy_processes {
+                let _ = proxy.kill(grace).await;
+            }
             let _ = process.kill(grace).await;
         })
     }

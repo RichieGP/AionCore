@@ -2984,10 +2984,7 @@ fn classify_repo_mcp_status(
     let delivery = mcp_delivery_plan(support.backend.as_deref(), projection.kind, &row.transport_type, true);
     let tool_count = mcp_tool_count(row.tools.as_deref());
 
-    if matches!(
-        projection.kind,
-        McpProjectionKind::ProxyRequired | McpProjectionKind::Unsupported
-    ) {
+    if matches!(projection.kind, McpProjectionKind::Unsupported) {
         return ConversationMcpStatus {
             id: row.id.clone(),
             name: row.name.clone(),
@@ -3589,6 +3586,43 @@ mod tests {
             status.delivery,
             Some(vec!["direct_session".to_owned(), "native_config".to_owned()])
         );
+        assert_eq!(status.tool_count, Some(1));
+    }
+
+    #[test]
+    fn classify_repo_mcp_status_records_proxy_delivery_for_network_only_backend() {
+        let row = aionui_db::models::McpServerRow {
+            id: "mcp-proxy".into(),
+            name: "stdio-through-proxy".into(),
+            description: None,
+            enabled: true,
+            transport_type: "stdio".into(),
+            transport_config: r#"{"command":"node","args":["server.mjs"],"env":{}}"#.into(),
+            tools: Some(serde_json::json!([{ "name": "tool_a" }]).to_string()),
+            last_test_status: "connected".into(),
+            last_connected: None,
+            original_json: None,
+            builtin: false,
+            deleted_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let status = classify_repo_mcp_status(
+            &row,
+            &McpSupportPolicy {
+                backend: Some("network-only".into()),
+                stdio: false,
+                http: true,
+                sse: false,
+                streamable_http: true,
+            },
+        );
+
+        assert_eq!(status.status, ConversationMcpStatusKind::Loaded);
+        assert_eq!(status.projection.as_deref(), Some("proxy_required"));
+        assert_eq!(status.delivery, Some(vec!["proxy_required".to_owned()]));
+        assert_eq!(status.injected, Some(true));
         assert_eq!(status.tool_count, Some(1));
     }
 

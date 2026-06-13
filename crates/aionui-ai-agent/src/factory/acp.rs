@@ -1,6 +1,11 @@
+use std::fs;
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::agent_task::AgentInstance;
+use crate::capability::cli_process::CliAgentProcess;
 use crate::error::AgentError;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
@@ -9,7 +14,7 @@ use crate::manager::acp::{AcpAgentManager, CatalogForwarder};
 use crate::session_context::AcpSessionBuildContext;
 use agent_client_protocol::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio};
 use aionui_api_types::{SessionMcpServer, SessionMcpTransport};
-use aionui_common::CommandSpec;
+use aionui_common::{CommandSpec, EnvVar};
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_mcp::{
@@ -20,6 +25,7 @@ use aionui_runtime::{
     ManagedAcpToolId, ensure_managed_acp_tool_with_reporter, ensure_node_runtime_with_reporter, ensure_runtime_command,
     ensure_runtime_command_with_reporter, resolve_command_path,
 };
+use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::runtime_status::{conversation_acp_tool_runtime_reporter, conversation_runtime_reporter};
@@ -130,14 +136,16 @@ pub(super) async fn build(
         &mcp_capabilities,
     );
 
-    let user_mcp_servers = load_user_mcp_servers(
+    let projected_user_mcps = load_user_mcp_servers(
         &user_mcp_rows,
         &ctx.conversation_id,
         meta.backend.as_deref(),
         &mcp_capabilities,
+        &deps.data_dir,
     )
     .await;
-    let mut session_mcp_servers = user_mcp_servers;
+    let mut session_mcp_servers = projected_user_mcps.servers;
+    let mcp_proxy_processes = projected_user_mcps.proxy_processes;
     for server in &config.session_mcp_servers {
         if !session_server_supported_by_capabilities(server, &mcp_capabilities) {
             warn!(
@@ -173,6 +181,7 @@ pub(super) async fn build(
             command_spec,
             config,
             session_mcp_servers,
+            mcp_proxy_processes,
             mcp_awareness_context,
             session_snapshot,
             deps.data_dir.clone(),
@@ -438,36 +447,217 @@ async fn sync_native_mcp_config_for_backend(rows: &[McpServerRow], conversation_
     }
 }
 
+struct ProjectedUserMcps {
+    servers: Vec<McpServer>,
+    proxy_processes: Vec<Arc<CliAgentProcess>>,
+}
+
+struct ProjectedProxyMcp {
+    server: McpServer,
+    process: Arc<CliAgentProcess>,
+}
+
+const STDIO_HTTP_PROXY_SCRIPT: &str = include_str!("../../assets/stdio-to-streamable-http-proxy.mjs");
+
+async fn start_stdio_http_proxy(
+    row: &McpServerRow,
+    conversation_id: &str,
+    data_dir: &Path,
+) -> Result<ProjectedProxyMcp, String> {
+    if row.transport_type != "stdio" {
+        return Err(format!(
+            "proxy only supports stdio source MCPs, got {}",
+            row.transport_type
+        ));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
+    let command = value
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "stdio: missing command".to_owned())?;
+    let args: Vec<String> = value
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut env_entries: Vec<(String, String)> = value
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    env_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let (resolved_command, args, env) = ensure_stdio_launch(command, &args, &env_entries).await?;
+    let port = allocate_loopback_port()?;
+    let script_path = write_stdio_http_proxy_script(data_dir)?;
+    let node = ensure_runtime_command("node")
+        .await
+        .map_err(|e| format!("failed to resolve node for MCP proxy: {e}"))?;
+
+    let mut proxy_args: Vec<String> = node
+        .args_prefix
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    proxy_args.push(script_path.display().to_string());
+
+    let mut proxy_env: Vec<EnvVar> = node
+        .env
+        .iter()
+        .map(|(name, value)| EnvVar {
+            name: name.to_string_lossy().to_string(),
+            value: value.to_string_lossy().to_string(),
+        })
+        .collect();
+    proxy_env.extend([
+        EnvVar {
+            name: "AION_MCP_PROXY_NAME".to_owned(),
+            value: row.name.clone(),
+        },
+        EnvVar {
+            name: "AION_MCP_PROXY_COMMAND".to_owned(),
+            value: resolved_command.display().to_string(),
+        },
+        EnvVar {
+            name: "AION_MCP_PROXY_ARGS_JSON".to_owned(),
+            value: serde_json::to_string(&args).map_err(|e| format!("failed to encode proxy args: {e}"))?,
+        },
+        EnvVar {
+            name: "AION_MCP_PROXY_ENV_JSON".to_owned(),
+            value: env_to_json(&env)?,
+        },
+        EnvVar {
+            name: "AION_MCP_PROXY_HOST".to_owned(),
+            value: "127.0.0.1".to_owned(),
+        },
+        EnvVar {
+            name: "AION_MCP_PROXY_PORT".to_owned(),
+            value: port.to_string(),
+        },
+    ]);
+
+    let command_spec = CommandSpec {
+        command: node.program,
+        args: proxy_args,
+        env: proxy_env,
+        cwd: None,
+    };
+    let process = Arc::new(
+        CliAgentProcess::spawn_for_sdk(command_spec, data_dir)
+            .await
+            .map_err(|e| format!("failed to spawn MCP proxy process: {e}"))?,
+    );
+    wait_for_proxy_port(port).await.map_err(|err| {
+        let process = Arc::clone(&process);
+        tokio::spawn(async move {
+            let _ = process.kill(Duration::from_millis(250)).await;
+        });
+        err
+    })?;
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    info!(
+        conversation_id,
+        server_id = %row.id,
+        server_name = %row.name,
+        %url,
+        "user_mcp: projected stdio MCP through local streamable HTTP proxy"
+    );
+    Ok(ProjectedProxyMcp {
+        server: McpServer::Http(McpServerHttp::new(row.name.clone(), url)),
+        process,
+    })
+}
+
+fn allocate_loopback_port() -> Result<u16, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("failed to allocate proxy port: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("failed to inspect proxy port: {e}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+fn write_stdio_http_proxy_script(data_dir: &Path) -> Result<PathBuf, String> {
+    let dir = data_dir.join("mcp-proxy");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create MCP proxy dir {}: {e}", dir.display()))?;
+    let path = dir.join("stdio-to-streamable-http-proxy.mjs");
+    fs::write(&path, STDIO_HTTP_PROXY_SCRIPT)
+        .map_err(|e| format!("failed to write MCP proxy script {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+fn env_to_json(env: &[EnvVariable]) -> Result<String, String> {
+    let mut obj = serde_json::Map::new();
+    for item in env {
+        obj.insert(item.name.clone(), serde_json::Value::String(item.value.clone()));
+    }
+    serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| format!("failed to encode proxy env: {e}"))
+}
+
+async fn wait_for_proxy_port(port: u16) -> Result<(), String> {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..50 {
+        if TcpStream::connect(&addr).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("MCP proxy did not listen on {addr} within timeout"))
+}
+
 async fn load_user_mcp_servers(
     rows: &[McpServerRow],
     conversation_id: &str,
     backend: Option<&str>,
     capabilities: &AcpMcpCapabilities,
-) -> Vec<McpServer> {
+    data_dir: &Path,
+) -> ProjectedUserMcps {
     let mut servers = Vec::with_capacity(rows.len());
+    let mut proxy_processes = Vec::new();
     for row in rows {
         let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
-        if projection.kind != McpProjectionKind::DirectSession {
-            warn!(
-                conversation_id,
-                server_id = %row.id,
-                server_name = %row.name,
-                transport_type = %row.transport_type,
-                projection = ?projection.kind,
-                reason = projection.reason,
-                "user_mcp: not injectable into ACP session/new"
-            );
-            continue;
-        }
-        match row_to_sdk_mcp_server(row).await {
-            Ok(server) => servers.push(server),
-            Err(err) => {
+        match projection.kind {
+            McpProjectionKind::DirectSession => match row_to_sdk_mcp_server(row).await {
+                Ok(server) => servers.push(server),
+                Err(err) => {
+                    warn!(
+                        conversation_id,
+                        server_id = %row.id,
+                        server_name = %row.name,
+                        error = %err,
+                        "user_mcp: failed to convert row; skipping"
+                    );
+                }
+            },
+            McpProjectionKind::ProxyRequired => match start_stdio_http_proxy(row, conversation_id, data_dir).await {
+                Ok(projected) => {
+                    servers.push(projected.server);
+                    proxy_processes.push(projected.process);
+                }
+                Err(err) => {
+                    warn!(
+                        conversation_id,
+                        server_id = %row.id,
+                        server_name = %row.name,
+                        error = %err,
+                        "user_mcp: failed to start stdio-to-http proxy; skipping"
+                    );
+                }
+            },
+            McpProjectionKind::NativeConfig | McpProjectionKind::Unsupported => {
                 warn!(
                     conversation_id,
                     server_id = %row.id,
                     server_name = %row.name,
-                    error = %err,
-                    "user_mcp: failed to convert row; skipping"
+                    transport_type = %row.transport_type,
+                    projection = ?projection.kind,
+                    reason = projection.reason,
+                    "user_mcp: not injectable into ACP session/new"
                 );
             }
         }
@@ -480,7 +670,17 @@ async fn load_user_mcp_servers(
             "user_mcp: injected into session/new"
         );
     }
-    servers
+    if !proxy_processes.is_empty() {
+        info!(
+            conversation_id,
+            count = proxy_processes.len(),
+            "user_mcp: stdio-to-http proxy processes started"
+        );
+    }
+    ProjectedUserMcps {
+        servers,
+        proxy_processes,
+    }
 }
 
 fn build_mcp_awareness_context(
@@ -494,7 +694,7 @@ fn build_mcp_awareness_context(
         let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
         if !matches!(
             projection.kind,
-            McpProjectionKind::DirectSession | McpProjectionKind::NativeConfig
+            McpProjectionKind::DirectSession | McpProjectionKind::NativeConfig | McpProjectionKind::ProxyRequired
         ) {
             continue;
         }
@@ -1106,6 +1306,31 @@ mod tests {
         assert!(ctx.is_none());
     }
 
+    #[test]
+    fn mcp_awareness_context_lists_proxy_projected_mcps() {
+        let row = make_row(
+            "stdio-through-proxy",
+            "stdio",
+            r#"{"command":"node","args":["server.mjs"],"env":{}}"#,
+            true,
+            false,
+        );
+        let ctx = build_mcp_awareness_context(
+            &[row],
+            &[],
+            Some("network-only"),
+            &AcpMcpCapabilities {
+                stdio: false,
+                http: true,
+                sse: false,
+            },
+        )
+        .expect("proxy awareness context");
+
+        assert!(ctx.contains("stdio-through-proxy"));
+        assert!(ctx.contains("delivery=proxy required"));
+    }
+
     // -- load_user_mcp_servers integration -----------------------------------
 
     use async_trait::async_trait;
@@ -1197,7 +1422,8 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = projected.servers;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -1216,7 +1442,8 @@ mod tests {
             rows: vec![],
             fail: true,
         });
-        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = projected.servers;
         assert!(servers.is_empty());
     }
 
@@ -1235,7 +1462,8 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = projected.servers;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
@@ -1260,8 +1488,9 @@ mod tests {
         });
 
         let selected = vec!["mcp_disabled-picked".to_owned()];
-        let servers =
+        let projected =
             load_user_mcp_servers_from_repo(repo.as_ref(), Some(&selected), "conv-1", Some("claude"), &caps).await;
+        let servers = projected.servers;
 
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -1274,7 +1503,7 @@ mod tests {
     async fn load_user_mcp_servers_skips_rows_unsupported_by_capabilities() {
         let caps = AcpMcpCapabilities {
             stdio: false,
-            http: true,
+            http: false,
             sse: false,
         };
         let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
@@ -1288,7 +1517,8 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("unknown"), &caps).await;
+        let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("unknown"), &caps).await;
+        let servers = projected.servers;
         assert!(servers.is_empty());
     }
 
@@ -1313,7 +1543,8 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("cursor"), &caps).await;
+        let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("cursor"), &caps).await;
+        let servers = projected.servers;
         assert_eq!(servers.len(), 1);
     }
 
@@ -1323,8 +1554,8 @@ mod tests {
         conversation_id: &str,
         backend: Option<&str>,
         capabilities: &AcpMcpCapabilities,
-    ) -> Vec<McpServer> {
+    ) -> ProjectedUserMcps {
         let rows = load_selected_user_mcp_rows(repo, selected_ids, conversation_id).await;
-        load_user_mcp_servers(&rows, conversation_id, backend, capabilities).await
+        load_user_mcp_servers(&rows, conversation_id, backend, capabilities, &std::env::temp_dir()).await
     }
 }

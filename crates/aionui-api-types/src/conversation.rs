@@ -30,6 +30,8 @@ pub struct ConversationMcpStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

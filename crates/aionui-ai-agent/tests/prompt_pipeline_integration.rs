@@ -70,6 +70,7 @@ async fn fixture_params(
             config,
             Vec::new(),
             None,
+            None,
             std::env::temp_dir(),
         )
         .await,

@@ -123,6 +123,13 @@ pub(super) async fn build(
 
     sync_native_mcp_config_for_backend(&user_mcp_rows, &ctx.conversation_id, meta.backend.as_deref()).await;
 
+    let mcp_awareness_context = build_mcp_awareness_context(
+        &user_mcp_rows,
+        &config.session_mcp_servers,
+        meta.backend.as_deref(),
+        &mcp_capabilities,
+    );
+
     let user_mcp_servers = load_user_mcp_servers(
         &user_mcp_rows,
         &ctx.conversation_id,
@@ -166,6 +173,7 @@ pub(super) async fn build(
             command_spec,
             config,
             session_mcp_servers,
+            mcp_awareness_context,
             session_snapshot,
             deps.data_dir.clone(),
         )
@@ -473,6 +481,103 @@ async fn load_user_mcp_servers(
         );
     }
     servers
+}
+
+fn build_mcp_awareness_context(
+    rows: &[McpServerRow],
+    session_servers: &[SessionMcpServer],
+    backend: Option<&str>,
+    capabilities: &AcpMcpCapabilities,
+) -> Option<String> {
+    let mut entries = Vec::new();
+    for row in rows {
+        let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
+        if !matches!(
+            projection.kind,
+            McpProjectionKind::DirectSession | McpProjectionKind::NativeConfig
+        ) {
+            continue;
+        }
+        let tools = cached_tool_names(row.tools.as_deref());
+        entries.push(format_mcp_awareness_entry(
+            &row.name,
+            &row.transport_type,
+            projection.kind,
+            &tools,
+        ));
+    }
+    for server in session_servers {
+        let transport = session_mcp_transport_label(&server.transport);
+        let projection = plan_mcp_projection(backend, transport, capabilities);
+        if !matches!(projection.kind, McpProjectionKind::DirectSession) {
+            continue;
+        }
+        entries.push(format_mcp_awareness_entry(
+            &server.name,
+            transport,
+            projection.kind,
+            &[],
+        ));
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "[MCP Tools]\n\
+The following MCP servers are selected for this conversation and should be treated as available when your runtime exposes MCP tools. Prefer these MCP tools over shelling out or searching local config for the same capability.\n\
+{}\n\
+[/MCP Tools]",
+        entries.join("\n")
+    ))
+}
+
+fn format_mcp_awareness_entry(
+    name: &str,
+    transport_type: &str,
+    projection: McpProjectionKind,
+    tools: &[String],
+) -> String {
+    let delivery = match projection {
+        McpProjectionKind::DirectSession => "direct session",
+        McpProjectionKind::NativeConfig => "native config",
+        McpProjectionKind::ProxyRequired => "proxy required",
+        McpProjectionKind::Unsupported => "unsupported",
+    };
+    if tools.is_empty() {
+        format!("- {name}: transport={transport_type}, delivery={delivery}")
+    } else {
+        format!(
+            "- {name}: transport={transport_type}, delivery={delivery}, cached_tools={}",
+            tools.join(", ")
+        )
+    }
+}
+
+fn cached_tool_names(raw_tools: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw_tools else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| item.get("name").and_then(|name| name.as_str()).map(str::to_owned))
+        .collect()
+}
+
+fn session_mcp_transport_label(transport: &SessionMcpTransport) -> &'static str {
+    match transport {
+        SessionMcpTransport::Stdio { .. } => "stdio",
+        SessionMcpTransport::Http { .. } => "http",
+        SessionMcpTransport::Sse { .. } => "sse",
+        SessionMcpTransport::StreamableHttp { .. } => "streamable_http",
+    }
 }
 
 /// Convert an `McpServerRow` into the SDK `McpServer` shape used by
@@ -932,6 +1037,73 @@ mod tests {
     async fn row_to_sdk_stdio_missing_command_errors() {
         let row = make_row("bad", "stdio", r#"{"args":[]}"#, true, false);
         assert!(row_to_sdk_mcp_server(&row).await.is_err());
+    }
+
+    #[test]
+    fn mcp_awareness_context_lists_all_accessible_selected_mcps() {
+        let mut searcher = make_row(
+            "kodo-searcher",
+            "stdio",
+            r#"{"command":"node","args":["searcher.mjs"],"env":{}}"#,
+            true,
+            false,
+        );
+        searcher.tools = Some(
+            serde_json::json!([
+                { "name": "coding_threads_search" },
+                { "name": "coding_thread_handoff" }
+            ])
+            .to_string(),
+        );
+        let mut ghidra = make_row(
+            "ghidra-mcp",
+            "stdio",
+            r#"{"command":"node","args":["ghidra.mjs"],"env":{}}"#,
+            true,
+            false,
+        );
+        ghidra.tools = Some(serde_json::json!([{ "name": "ghidra_status" }]).to_string());
+
+        let ctx = build_mcp_awareness_context(
+            &[searcher, ghidra],
+            &[],
+            Some("cursor"),
+            &AcpMcpCapabilities {
+                stdio: true,
+                http: true,
+                sse: true,
+            },
+        )
+        .expect("awareness context");
+
+        assert!(ctx.contains("[MCP Tools]"));
+        assert!(ctx.contains("kodo-searcher"));
+        assert!(ctx.contains("coding_threads_search"));
+        assert!(ctx.contains("ghidra-mcp"));
+        assert!(ctx.contains("ghidra_status"));
+    }
+
+    #[test]
+    fn mcp_awareness_context_skips_unsupported_mcps() {
+        let row = make_row(
+            "local-only",
+            "stdio",
+            r#"{"command":"node","args":["server.mjs"],"env":{}}"#,
+            true,
+            false,
+        );
+        let ctx = build_mcp_awareness_context(
+            &[row],
+            &[],
+            Some("unknown"),
+            &AcpMcpCapabilities {
+                stdio: false,
+                http: false,
+                sse: false,
+            },
+        );
+
+        assert!(ctx.is_none());
     }
 
     // -- load_user_mcp_servers integration -----------------------------------

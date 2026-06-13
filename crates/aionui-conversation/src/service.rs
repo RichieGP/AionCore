@@ -2981,9 +2981,13 @@ fn classify_repo_mcp_status(
     let capabilities = support.capabilities();
     let projection = plan_mcp_projection(support.backend.as_deref(), &row.transport_type, &capabilities);
     let projection_label = mcp_projection_label(projection.kind);
+    let delivery = mcp_delivery_plan(support.backend.as_deref(), projection.kind, &row.transport_type, true);
     let tool_count = mcp_tool_count(row.tools.as_deref());
 
-    if projection.kind != McpProjectionKind::DirectSession {
+    if matches!(
+        projection.kind,
+        McpProjectionKind::ProxyRequired | McpProjectionKind::Unsupported
+    ) {
         return ConversationMcpStatus {
             id: row.id.clone(),
             name: row.name.clone(),
@@ -2993,6 +2997,7 @@ fn classify_repo_mcp_status(
             injected: Some(false),
             transport: Some(row.transport_type.clone()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count,
             reason: Some(projection.reason.to_owned()),
         };
@@ -3008,6 +3013,7 @@ fn classify_repo_mcp_status(
             injected: Some(true),
             transport: Some(row.transport_type.clone()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count,
             reason: None,
         },
@@ -3020,6 +3026,7 @@ fn classify_repo_mcp_status(
             injected: Some(false),
             transport: Some(row.transport_type.clone()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count,
             reason: Some(reason),
         },
@@ -3031,8 +3038,12 @@ fn classify_session_mcp_status(server: &SessionMcpServer, support: &McpSupportPo
     let capabilities = support.capabilities();
     let projection = plan_mcp_projection(support.backend.as_deref(), transport, &capabilities);
     let projection_label = mcp_projection_label(projection.kind);
+    let delivery = mcp_delivery_plan(support.backend.as_deref(), projection.kind, transport, false);
 
-    if projection.kind != McpProjectionKind::DirectSession {
+    if matches!(
+        projection.kind,
+        McpProjectionKind::ProxyRequired | McpProjectionKind::Unsupported
+    ) {
         return ConversationMcpStatus {
             id: server.id.clone(),
             name: server.name.clone(),
@@ -3042,6 +3053,7 @@ fn classify_session_mcp_status(server: &SessionMcpServer, support: &McpSupportPo
             injected: Some(false),
             transport: Some(transport.to_owned()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count: None,
             reason: Some(projection.reason.to_owned()),
         };
@@ -3057,6 +3069,7 @@ fn classify_session_mcp_status(server: &SessionMcpServer, support: &McpSupportPo
             injected: Some(true),
             transport: Some(transport.to_owned()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count: None,
             reason: None,
         },
@@ -3069,6 +3082,7 @@ fn classify_session_mcp_status(server: &SessionMcpServer, support: &McpSupportPo
             injected: Some(false),
             transport: Some(transport.to_owned()),
             projection: Some(projection_label.to_owned()),
+            delivery: Some(delivery),
             tool_count: None,
             reason: Some(reason),
         },
@@ -3091,6 +3105,35 @@ fn mcp_projection_label(kind: McpProjectionKind) -> &'static str {
         McpProjectionKind::ProxyRequired => "proxy_required",
         McpProjectionKind::Unsupported => "unsupported",
     }
+}
+
+fn mcp_delivery_plan(
+    backend: Option<&str>,
+    projection: McpProjectionKind,
+    transport_type: &str,
+    include_native_config: bool,
+) -> Vec<String> {
+    let mut delivery = Vec::new();
+    if projection == McpProjectionKind::DirectSession {
+        delivery.push("direct_session".to_owned());
+    }
+    if include_native_config && mcp_native_config_delivery_enabled(backend) {
+        delivery.push("native_config".to_owned());
+    }
+    if projection == McpProjectionKind::NativeConfig && delivery.is_empty() {
+        delivery.push("native_config".to_owned());
+    }
+    if projection == McpProjectionKind::ProxyRequired {
+        delivery.push("proxy_required".to_owned());
+    }
+    if delivery.is_empty() {
+        delivery.push(format!("unsupported_{transport_type}"));
+    }
+    delivery
+}
+
+fn mcp_native_config_delivery_enabled(backend: Option<&str>) -> bool {
+    matches!(backend, Some("cursor" | "qwen"))
 }
 
 fn mcp_tool_count(raw_tools: Option<&str>) -> Option<usize> {
@@ -3508,6 +3551,45 @@ mod tests {
         );
 
         assert_eq!(status.status, ConversationMcpStatusKind::Unsupported);
+    }
+
+    #[test]
+    fn classify_repo_mcp_status_records_direct_and_native_delivery_for_cursor() {
+        let row = aionui_db::models::McpServerRow {
+            id: "mcp-searcher".into(),
+            name: "kodo-searcher".into(),
+            description: None,
+            enabled: true,
+            transport_type: "stdio".into(),
+            transport_config: r#"{"command":"node","args":["server.mjs"],"env":{}}"#.into(),
+            tools: Some(serde_json::json!([{ "name": "coding_threads_search" }]).to_string()),
+            last_test_status: "connected".into(),
+            last_connected: None,
+            original_json: None,
+            builtin: false,
+            deleted_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let status = classify_repo_mcp_status(
+            &row,
+            &McpSupportPolicy {
+                backend: Some("cursor".into()),
+                stdio: true,
+                http: true,
+                sse: true,
+                streamable_http: true,
+            },
+        );
+
+        assert_eq!(status.status, ConversationMcpStatusKind::Loaded);
+        assert_eq!(status.projection.as_deref(), Some("direct_session"));
+        assert_eq!(
+            status.delivery,
+            Some(vec!["direct_session".to_owned(), "native_config".to_owned()])
+        );
+        assert_eq!(status.tool_count, Some(1));
     }
 
     #[test]

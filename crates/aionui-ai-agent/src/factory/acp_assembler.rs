@@ -66,12 +66,14 @@ pub async fn assemble_acp_params(
     command_spec: CommandSpec,
     config: AcpBuildExtra,
     user_mcp_servers: Vec<McpServer>,
+    mcp_awareness_context: Option<String>,
     session_snapshot: Option<PersistedSessionState>,
     data_dir: PathBuf,
 ) -> AcpSessionParams {
     let mcp_servers = resolve_mcp_servers(&config, &conversation_id, user_mcp_servers);
     let preset_context = compose_preset_context(
         config.preset_context.as_deref(),
+        mcp_awareness_context.as_deref(),
         config.backend.as_deref(),
         config.team_mcp_stdio_config.is_some(),
     );
@@ -119,26 +121,34 @@ fn resolve_mcp_servers(
 /// prompt for solo sessions on team-capable backends.
 fn compose_preset_context(
     base_preset_context: Option<&str>,
+    mcp_awareness_context: Option<&str>,
     backend: Option<&str>,
     has_team_session: bool,
 ) -> Option<String> {
-    let base = base_preset_context
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let mut blocks: Vec<String> = Vec::new();
+    if let Some(base) = base_preset_context.map(str::trim).filter(|s| !s.is_empty()) {
+        blocks.push(base.to_owned());
+    }
+    if let Some(mcp) = mcp_awareness_context.map(str::trim).filter(|s| !s.is_empty()) {
+        blocks.push(mcp.to_owned());
+    }
 
     if has_team_session {
-        return base;
-    }
-    let backend_key = backend.unwrap_or_default();
-    if !team_guide_prompt::is_solo_team_guide_backend(backend_key) {
-        return base;
+        return join_context_blocks(blocks);
     }
 
-    let guide = team_guide_prompt::build_solo_team_guide_prompt(backend_key);
-    match base {
-        Some(ctx) => Some(format!("{ctx}\n\n{guide}")),
-        None => Some(guide),
+    let backend_key = backend.unwrap_or_default();
+    if team_guide_prompt::is_solo_team_guide_backend(backend_key) {
+        blocks.push(team_guide_prompt::build_solo_team_guide_prompt(backend_key));
+    }
+    join_context_blocks(blocks)
+}
+
+fn join_context_blocks(blocks: Vec<String>) -> Option<String> {
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
     }
 }
 
@@ -174,33 +184,47 @@ mod tests {
 
     #[test]
     fn compose_preset_context_no_team_no_backend() {
-        let result = compose_preset_context(Some("hello"), None, false);
+        let result = compose_preset_context(Some("hello"), None, None, false);
         assert_eq!(result, Some("hello".to_owned()));
     }
 
     #[test]
     fn compose_preset_context_team_session_skips_guide() {
-        let result = compose_preset_context(Some("hello"), Some("claude"), true);
+        let result = compose_preset_context(Some("hello"), None, Some("claude"), true);
         assert_eq!(result, Some("hello".to_owned()));
     }
 
     #[test]
     fn compose_preset_context_non_team_capable_backend() {
-        let result = compose_preset_context(Some("hello"), Some("unknown"), false);
+        let result = compose_preset_context(Some("hello"), None, Some("unknown"), false);
         assert_eq!(result, Some("hello".to_owned()));
     }
 
     #[test]
     fn compose_preset_context_team_capable_backend_appends_guide() {
-        let result = compose_preset_context(None, Some("claude"), false);
+        let result = compose_preset_context(None, None, Some("claude"), false);
         assert!(result.is_some());
         assert!(result.unwrap().contains("team"));
     }
 
     #[test]
     fn compose_preset_context_empty_string_treated_as_none() {
-        let result = compose_preset_context(Some("  "), Some("unknown"), false);
+        let result = compose_preset_context(Some("  "), None, Some("unknown"), false);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compose_preset_context_appends_mcp_awareness() {
+        let result = compose_preset_context(
+            Some("base"),
+            Some("[MCP Tools]\n- kodo-searcher"),
+            Some("unknown"),
+            false,
+        )
+        .unwrap();
+        assert!(result.contains("base"));
+        assert!(result.contains("[MCP Tools]"));
+        assert!(result.contains("kodo-searcher"));
     }
 
     fn user_stdio(name: &str) -> McpServer {

@@ -19,6 +19,18 @@ pub struct ConversationMcpStatus {
     pub id: String,
     pub name: String,
     pub status: ConversationMcpStatusKind,
+    #[serde(default)]
+    pub selected: bool,
+    #[serde(default)]
+    pub planned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

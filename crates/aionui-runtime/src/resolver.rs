@@ -160,8 +160,33 @@ pub fn resolve_command_path(cmd: &str) -> Option<PathBuf> {
             }
             which::which("bunx").ok()
         }
-        other => which::which(other).ok().or_else(|| windows_shim_fallback(other)),
+        other => which::which(other)
+            .ok()
+            .or_else(|| user_tool_dir_fallback(other))
+            .or_else(|| windows_shim_fallback(other)),
     }
+}
+
+fn user_tool_dir_fallback(cmd: &str) -> Option<PathBuf> {
+    if Path::new(cmd).components().count() != 1 {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.extend(user_tool_dir_candidates(cmd, &PathBuf::from(home)));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin").join(cmd));
+    candidates.push(PathBuf::from("/usr/local/bin").join(cmd));
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn user_tool_dir_candidates(cmd: &str, home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/bin").join(cmd),
+        home.join("Coding Tools/bin").join(cmd),
+    ]
 }
 
 #[cfg(windows)]
@@ -245,6 +270,20 @@ mod tests {
         let mut h = Sha256::new();
         h.update(payload);
         hex::encode(h.finalize())
+    }
+
+    #[test]
+    fn user_tool_dir_candidates_include_local_and_coding_tools_bins() {
+        let home = PathBuf::from("/Users/tester");
+        let candidates = user_tool_dir_candidates("qwen", &home);
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/Users/tester/.local/bin/qwen"),
+                PathBuf::from("/Users/tester/Coding Tools/bin/qwen"),
+            ]
+        );
     }
 
     #[test]

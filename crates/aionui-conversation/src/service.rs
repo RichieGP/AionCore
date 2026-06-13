@@ -32,7 +32,10 @@ use aionui_db::{
     UpsertConversationAssistantSnapshotParams,
 };
 use aionui_extension::AssistantRuleDispatcher;
-use aionui_mcp::{AcpMcpCapabilities, normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities};
+use aionui_mcp::{
+    AcpMcpCapabilities, McpProjectionKind, normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities,
+    plan_mcp_projection,
+};
 use aionui_realtime::EventBroadcaster;
 use aionui_runtime::{RuntimeCommandProbe, probe_node_runtime_supported, probe_runtime_command, resolve_command_path};
 use std::collections::{HashMap, HashSet};
@@ -161,8 +164,9 @@ fn assistant_snapshot_modes<'a>(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct McpSupportPolicy {
+    backend: Option<String>,
     stdio: bool,
     http: bool,
     sse: bool,
@@ -171,14 +175,16 @@ struct McpSupportPolicy {
 
 impl McpSupportPolicy {
     const AIONRS: Self = Self {
+        backend: None,
         stdio: true,
         http: true,
         sse: true,
         streamable_http: true,
     };
 
-    fn from_acp_capabilities(capabilities: AcpMcpCapabilities) -> Self {
+    fn from_acp_capabilities(capabilities: AcpMcpCapabilities, backend: Option<String>) -> Self {
         Self {
+            backend,
             stdio: capabilities.stdio,
             http: capabilities.http,
             sse: capabilities.sse,
@@ -186,22 +192,11 @@ impl McpSupportPolicy {
         }
     }
 
-    fn supports_row_transport(self, transport_type: &str) -> bool {
-        match transport_type {
-            "stdio" => self.stdio,
-            "http" => self.http,
-            "sse" => self.sse,
-            "streamable_http" => self.streamable_http,
-            _ => false,
-        }
-    }
-
-    fn supports_session_transport(self, transport: &SessionMcpTransport) -> bool {
-        match transport {
-            SessionMcpTransport::Stdio { .. } => self.stdio,
-            SessionMcpTransport::Http { .. } => self.http,
-            SessionMcpTransport::Sse { .. } => self.sse,
-            SessionMcpTransport::StreamableHttp { .. } => self.streamable_http,
+    fn capabilities(&self) -> AcpMcpCapabilities {
+        AcpMcpCapabilities {
+            stdio: self.stdio,
+            http: self.http || self.streamable_http,
+            sse: self.sse,
         }
     }
 }
@@ -785,7 +780,7 @@ impl ConversationService {
                 upsert_conversation_mcp_status(
                     &mut selected_mcp_statuses,
                     &mut status_index_by_name,
-                    classify_repo_mcp_status(row, mcp_support),
+                    classify_repo_mcp_status(row, &mcp_support),
                 );
             }
         }
@@ -798,7 +793,7 @@ impl ConversationService {
                 upsert_conversation_mcp_status(
                     &mut selected_mcp_statuses,
                     &mut status_index_by_name,
-                    classify_session_mcp_status(server, mcp_support),
+                    classify_session_mcp_status(server, &mcp_support),
                 );
             }
         }
@@ -2949,7 +2944,9 @@ async fn resolve_acp_mcp_support_policy(
         None => capabilities,
     };
 
-    Ok(McpSupportPolicy::from_acp_capabilities(capabilities))
+    let backend = row.as_ref().and_then(|row| row.backend.clone());
+
+    Ok(McpSupportPolicy::from_acp_capabilities(capabilities, backend))
 }
 
 fn agent_row_args(raw_args: Option<&str>) -> Vec<String> {
@@ -2982,16 +2979,27 @@ fn upsert_conversation_mcp_status(
     statuses.push(status);
 }
 
-fn classify_repo_mcp_status(row: &aionui_db::models::McpServerRow, support: McpSupportPolicy) -> ConversationMcpStatus {
-    if !support.supports_row_transport(&row.transport_type) {
+fn classify_repo_mcp_status(
+    row: &aionui_db::models::McpServerRow,
+    support: &McpSupportPolicy,
+) -> ConversationMcpStatus {
+    let capabilities = support.capabilities();
+    let projection = plan_mcp_projection(support.backend.as_deref(), &row.transport_type, &capabilities);
+    let projection_label = mcp_projection_label(projection.kind);
+    let tool_count = mcp_tool_count(row.tools.as_deref());
+
+    if projection.kind != McpProjectionKind::DirectSession {
         return ConversationMcpStatus {
             id: row.id.clone(),
             name: row.name.clone(),
             status: ConversationMcpStatusKind::Unsupported,
-            reason: Some(format!(
-                "transport '{}' is not supported by this agent",
-                row.transport_type
-            )),
+            selected: true,
+            planned: false,
+            injected: Some(false),
+            transport: Some(row.transport_type.clone()),
+            projection: Some(projection_label.to_owned()),
+            tool_count,
+            reason: Some(projection.reason.to_owned()),
         };
     }
 
@@ -3000,30 +3008,47 @@ fn classify_repo_mcp_status(row: &aionui_db::models::McpServerRow, support: McpS
             id: row.id.clone(),
             name: row.name.clone(),
             status: ConversationMcpStatusKind::Loaded,
+            selected: true,
+            planned: true,
+            injected: Some(true),
+            transport: Some(row.transport_type.clone()),
+            projection: Some(projection_label.to_owned()),
+            tool_count,
             reason: None,
         },
         Err(reason) => ConversationMcpStatus {
             id: row.id.clone(),
             name: row.name.clone(),
             status: ConversationMcpStatusKind::Failed,
+            selected: true,
+            planned: false,
+            injected: Some(false),
+            transport: Some(row.transport_type.clone()),
+            projection: Some(projection_label.to_owned()),
+            tool_count,
             reason: Some(reason),
         },
     }
 }
 
-fn classify_session_mcp_status(server: &SessionMcpServer, support: McpSupportPolicy) -> ConversationMcpStatus {
-    if !support.supports_session_transport(&server.transport) {
-        let transport = match &server.transport {
-            SessionMcpTransport::Stdio { .. } => "stdio",
-            SessionMcpTransport::Http { .. } => "http",
-            SessionMcpTransport::Sse { .. } => "sse",
-            SessionMcpTransport::StreamableHttp { .. } => "streamable_http",
-        };
+fn classify_session_mcp_status(server: &SessionMcpServer, support: &McpSupportPolicy) -> ConversationMcpStatus {
+    let transport = session_transport_label(&server.transport);
+    let capabilities = support.capabilities();
+    let projection = plan_mcp_projection(support.backend.as_deref(), transport, &capabilities);
+    let projection_label = mcp_projection_label(projection.kind);
+
+    if projection.kind != McpProjectionKind::DirectSession {
         return ConversationMcpStatus {
             id: server.id.clone(),
             name: server.name.clone(),
             status: ConversationMcpStatusKind::Unsupported,
-            reason: Some(format!("transport '{transport}' is not supported by this agent")),
+            selected: true,
+            planned: false,
+            injected: Some(false),
+            transport: Some(transport.to_owned()),
+            projection: Some(projection_label.to_owned()),
+            tool_count: None,
+            reason: Some(projection.reason.to_owned()),
         };
     }
 
@@ -3032,15 +3057,51 @@ fn classify_session_mcp_status(server: &SessionMcpServer, support: McpSupportPol
             id: server.id.clone(),
             name: server.name.clone(),
             status: ConversationMcpStatusKind::Loaded,
+            selected: true,
+            planned: true,
+            injected: Some(true),
+            transport: Some(transport.to_owned()),
+            projection: Some(projection_label.to_owned()),
+            tool_count: None,
             reason: None,
         },
         Err(reason) => ConversationMcpStatus {
             id: server.id.clone(),
             name: server.name.clone(),
             status: ConversationMcpStatusKind::Failed,
+            selected: true,
+            planned: false,
+            injected: Some(false),
+            transport: Some(transport.to_owned()),
+            projection: Some(projection_label.to_owned()),
+            tool_count: None,
             reason: Some(reason),
         },
     }
+}
+
+fn session_transport_label(transport: &SessionMcpTransport) -> &'static str {
+    match transport {
+        SessionMcpTransport::Stdio { .. } => "stdio",
+        SessionMcpTransport::Http { .. } => "http",
+        SessionMcpTransport::Sse { .. } => "sse",
+        SessionMcpTransport::StreamableHttp { .. } => "streamable_http",
+    }
+}
+
+fn mcp_projection_label(kind: McpProjectionKind) -> &'static str {
+    match kind {
+        McpProjectionKind::DirectSession => "direct_session",
+        McpProjectionKind::NativeConfig => "native_config",
+        McpProjectionKind::ProxyRequired => "proxy_required",
+        McpProjectionKind::Unsupported => "unsupported",
+    }
+}
+
+fn mcp_tool_count(raw_tools: Option<&str>) -> Option<usize> {
+    raw_tools
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_array().map(Vec::len))
 }
 
 fn validate_repo_transport(transport_type: &str, transport_config: &str) -> Result<(), String> {
@@ -3442,7 +3503,8 @@ mod tests {
                     headers: HashMap::new(),
                 },
             },
-            McpSupportPolicy {
+            &McpSupportPolicy {
+                backend: None,
                 stdio: true,
                 http: false,
                 sse: false,
@@ -3465,7 +3527,7 @@ mod tests {
                     env: HashMap::new(),
                 },
             },
-            McpSupportPolicy::AIONRS,
+            &McpSupportPolicy::AIONRS,
         );
 
         assert_eq!(status.status, ConversationMcpStatusKind::Failed);

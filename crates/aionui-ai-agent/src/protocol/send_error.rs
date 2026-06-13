@@ -621,8 +621,12 @@ fn classify_provider_text(lower: &str) -> Option<ClassifiedError> {
             "context window exceeds",
             "context length",
             "context too large",
+            "context is too large to send safely",
             "maximum context",
             "prompt is too long",
+            "estimated prompt tokens",
+            "hard limit",
+            "compression_failed_empty_summary",
         ],
     ) {
         return Some(provider_error(
@@ -1249,6 +1253,33 @@ mod tests {
         assert!(!detail.contains("Failed to connect MCP servers"));
         assert!(!detail.contains("sk-secret"));
         assert!(!detail.contains("api_key"));
+    }
+
+    #[test]
+    fn classifies_codex_context_compression_failure_as_context_too_large() {
+        let detail = "API Error: Context is too large to send safely after automatic compression. Estimated prompt tokens: 108397; hard limit: 108072; compression status: COMPRESSION_FAILED_EMPTY_SUMMARY.";
+        assert_classification(
+            detail,
+            AgentErrorCode::UserLlmProviderContextTooLarge,
+            AgentErrorOwnership::UserLlmProvider,
+            AgentErrorResolutionKind::ReduceContext,
+        );
+    }
+
+    #[test]
+    fn classifies_acp_internal_codex_context_failure_as_context_too_large() {
+        assert_acp_classification(
+            AcpError::AgentInternal {
+                message: "Internal error".into(),
+                code: -32603,
+                data: Some(json!({
+                    "message": "Context is too large to send safely after automatic compression. Estimated prompt tokens: 108397; hard limit: 108072; compression status: COMPRESSION_FAILED_EMPTY_SUMMARY."
+                })),
+            },
+            AgentErrorCode::UserLlmProviderContextTooLarge,
+            AgentErrorOwnership::UserLlmProvider,
+            AgentErrorResolutionKind::ReduceContext,
+        );
     }
 
     #[test]

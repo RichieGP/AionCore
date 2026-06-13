@@ -12,7 +12,10 @@ use aionui_api_types::{SessionMcpServer, SessionMcpTransport};
 use aionui_common::CommandSpec;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
-use aionui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
+use aionui_mcp::{
+    AcpMcpCapabilities, McpProjectionKind, normalize_acp_mcp_capabilities_for_backend, parse_acp_mcp_capabilities,
+    plan_mcp_projection,
+};
 use aionui_runtime::{
     ManagedAcpToolId, ensure_managed_acp_tool_with_reporter, ensure_node_runtime_with_reporter, ensure_runtime_command,
     ensure_runtime_command_with_reporter, resolve_command_path,
@@ -103,6 +106,7 @@ pub(super) async fn build(
         .as_ref()
         .map(parse_acp_mcp_capabilities)
         .unwrap_or_default();
+    let mcp_capabilities = normalize_acp_mcp_capabilities_for_backend(mcp_capabilities, meta.backend.as_deref());
 
     let user_mcp_servers = match deps.mcp_server_repo.as_ref() {
         Some(repo) => {
@@ -110,6 +114,7 @@ pub(super) async fn build(
                 repo.as_ref(),
                 config.mcp_server_ids.as_deref(),
                 &ctx.conversation_id,
+                meta.backend.as_deref(),
                 &mcp_capabilities,
             )
             .await
@@ -180,18 +185,19 @@ pub(super) async fn build(
         arc.set_session_id(sid).await;
     }
 
-    // Open the ACP session eagerly so `POST /warmup` returns only after
-    // session/new (or claude-meta-resume / session/load) and the first
-    // reconcile pass have completed. Matches aionrs factory behaviour:
-    // the caller sees "warmed up" == "ready for PUT /mode | /model".
-    arc.warmup_session().await?;
-
-    let instance = AgentInstance::Acp(Arc::clone(&arc));
-
     // Hand the service the domain event receiver so it can
     // persist user intent changes without reverse-engineering
     // them from CLI observations.
     deps.acp_agent_service.attach(ctx.conversation_id, domain_rx).await;
+
+    // Open the ACP session eagerly so `POST /warmup` returns only after
+    // session/new (or claude-meta-resume / session/load) and the first
+    // reconcile pass have completed. The persistence consumer must be
+    // attached first because warmup can emit the initial SessionAssigned
+    // event synchronously while creating a native ACP session.
+    arc.warmup_session().await?;
+
+    let instance = AgentInstance::Acp(Arc::clone(&arc));
 
     Ok(instance)
 }
@@ -315,6 +321,7 @@ async fn load_user_mcp_servers(
     repo: &dyn IMcpServerRepository,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
+    backend: Option<&str>,
     capabilities: &AcpMcpCapabilities,
 ) -> Vec<McpServer> {
     let rows_result = match selected_ids {
@@ -341,13 +348,16 @@ async fn load_user_mcp_servers(
         if !selected || row.builtin {
             continue;
         }
-        if !row_supported_by_capabilities(&row, capabilities) {
+        let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
+        if projection.kind != McpProjectionKind::DirectSession {
             warn!(
                 conversation_id,
                 server_id = %row.id,
                 server_name = %row.name,
                 transport_type = %row.transport_type,
-                "user_mcp: transport unsupported by ACP agent; skipping"
+                projection = ?projection.kind,
+                reason = projection.reason,
+                "user_mcp: not injectable into ACP session/new"
             );
             continue;
         }
@@ -512,15 +522,6 @@ async fn ensure_stdio_launch(
     }));
 
     Ok((resolved.program, final_args, final_env))
-}
-
-fn row_supported_by_capabilities(row: &McpServerRow, capabilities: &AcpMcpCapabilities) -> bool {
-    match row.transport_type.as_str() {
-        "stdio" => capabilities.stdio,
-        "http" | "streamable_http" => capabilities.http,
-        "sse" => capabilities.sse,
-        _ => false,
-    }
 }
 
 fn session_server_supported_by_capabilities(server: &SessionMcpServer, capabilities: &AcpMcpCapabilities) -> bool {
@@ -857,7 +858,7 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -876,7 +877,7 @@ mod tests {
             rows: vec![],
             fail: true,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert!(servers.is_empty());
     }
 
@@ -895,7 +896,7 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
@@ -920,7 +921,7 @@ mod tests {
         });
 
         let selected = vec!["mcp_disabled-picked".to_owned()];
-        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", Some("claude"), &caps).await;
 
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -947,7 +948,32 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", &caps).await;
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("unknown"), &caps).await;
         assert!(servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_user_mcp_servers_keeps_stdio_for_normalized_cursor_backend() {
+        let caps = normalize_acp_mcp_capabilities_for_backend(
+            AcpMcpCapabilities {
+                stdio: false,
+                http: true,
+                sse: true,
+            },
+            Some("cursor"),
+        );
+        let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
+            rows: vec![make_row(
+                "cursor-stdio",
+                "stdio",
+                r#"{"command":"npx","args":[],"env":{}}"#,
+                true,
+                false,
+            )],
+            fail: false,
+        });
+
+        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("cursor"), &caps).await;
+        assert_eq!(servers.len(), 1);
     }
 }

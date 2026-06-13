@@ -110,7 +110,8 @@ pub struct ImageGenConfig {
 ///
 /// Looks for capabilities under `mcp_capabilities`, `mcpCapabilities`,
 /// or `mcp` keys. Returns default capabilities (stdio only) when the
-/// field is missing or not an object.
+/// field is missing or not an object. When a backend declares capabilities,
+/// each transport flag is respected independently.
 pub fn parse_acp_mcp_capabilities(response: &serde_json::Value) -> AcpMcpCapabilities {
     let caps = response
         .get("mcp_capabilities")
@@ -123,9 +124,39 @@ pub fn parse_acp_mcp_capabilities(response: &serde_json::Value) -> AcpMcpCapabil
 
     let http = bool_field(caps, "http");
     let sse = bool_field(caps, "sse");
-    let stdio = bool_field(caps, "stdio") || http || sse;
+    let stdio = bool_field(caps, "stdio");
 
     AcpMcpCapabilities { stdio, http, sse }
+}
+
+/// Apply backend-specific corrections for ACP adapters whose handshake MCP
+/// metadata is incomplete compared with their native MCP client support.
+///
+/// This does not invent a transport for unknown backends; it only records
+/// known stdio support for first-party/common coding CLIs that Aion can
+/// configure or has verified separately.
+pub fn normalize_acp_mcp_capabilities_for_backend(
+    capabilities: AcpMcpCapabilities,
+    backend: Option<&str>,
+) -> AcpMcpCapabilities {
+    let Some(backend) = backend else {
+        return capabilities;
+    };
+    if backend_supports_native_stdio_mcp(backend) {
+        AcpMcpCapabilities {
+            stdio: true,
+            ..capabilities
+        }
+    } else {
+        capabilities
+    }
+}
+
+fn backend_supports_native_stdio_mcp(backend: &str) -> bool {
+    matches!(
+        backend,
+        "claude" | "codex" | "cursor" | "gemini" | "qwen" | "aionrs" | "opencode" | "codebuddy"
+    )
 }
 
 /// Build ACP session MCP server configs from domain servers.
@@ -345,7 +376,7 @@ mod tests {
             "mcp": { "stdio": false, "http": true, "sse": false }
         });
         let caps = parse_acp_mcp_capabilities(&resp);
-        assert!(caps.stdio);
+        assert!(!caps.stdio);
         assert!(caps.http);
         assert!(!caps.sse);
     }
@@ -369,14 +400,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_http_support_implies_stdio() {
+    fn parse_http_support_does_not_imply_stdio() {
         let resp = serde_json::json!({
             "mcp_capabilities": { "http": true, "sse": false }
         });
         let caps = parse_acp_mcp_capabilities(&resp);
-        assert!(caps.stdio);
+        assert!(!caps.stdio);
         assert!(caps.http);
         assert!(!caps.sse);
+    }
+
+    #[test]
+    fn parse_sse_support_does_not_imply_stdio() {
+        let resp = serde_json::json!({
+            "mcp_capabilities": { "http": false, "sse": true }
+        });
+        let caps = parse_acp_mcp_capabilities(&resp);
+        assert!(!caps.stdio);
+        assert!(!caps.http);
+        assert!(caps.sse);
     }
 
     #[test]
@@ -387,6 +429,30 @@ mod tests {
         });
         let caps = parse_acp_mcp_capabilities(&resp);
         assert_eq!(caps, all_caps());
+    }
+
+    #[test]
+    fn normalize_known_backend_enables_stdio() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: true,
+        };
+        let normalized = normalize_acp_mcp_capabilities_for_backend(caps, Some("cursor"));
+        assert!(normalized.stdio);
+        assert!(normalized.http);
+        assert!(normalized.sse);
+    }
+
+    #[test]
+    fn normalize_unknown_backend_preserves_declared_caps() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: false,
+        };
+        let normalized = normalize_acp_mcp_capabilities_for_backend(caps.clone(), Some("unknown"));
+        assert_eq!(normalized, caps);
     }
 
     // -- convert_server -------------------------------------------------------

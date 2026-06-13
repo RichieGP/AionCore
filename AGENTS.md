@@ -225,3 +225,69 @@ cargo test -p aionui-<crate1> -p aionui-<crate2>                               #
 ```bash
 just push                                             # fmt → clippy → test → git push
 ```
+
+<!-- ALFRED-CODING-TOOLS:START -->
+
+## Canonical Coding Tools
+
+Common agent coding tools are installed centrally on `laptop`, `server`, and `study` under:
+
+`/Users/richard/Coding Tools`
+
+Use `/Users/richard/Coding Tools/bin/<tool>` before repo-local installs, Homebrew paths, or ad hoc downloads. Each tool also has an owned subfolder at `/Users/richard/Coding Tools/tools/<tool>/bin/<tool>`, and the per-machine manifest is at:
+
+`/Users/richard/Coding Tools/manifests/coding-tools-manifest.md`
+
+Daily agent workbench paths:
+
+| Category | Tools |
+| --- | --- |
+| File create/remove/edit | `apply_patch`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`, `ln`, `chmod`, `chown`, `chgrp`, `stat` |
+| File/path inspection | `cat`, `ls`, `pwd`, `tree`, `bat`, `find`, `fd`, `realpath`, `basename`, `dirname`, `du`, `df`, `mktemp` |
+| Search/replace/text | `rg`, `grep`, `egrep`, `fgrep`, `sed`, `sd`, `awk`, `xargs`, `sort`, `uniq`, `head`, `tail`, `wc`, `tee` |
+| Diff/patch | `diff`, `patch`, `cmp`, `comm`, `diff3`, `sdiff` |
+| Git/GitHub | `git`, `git-lfs`, `gh`, `ssh`, `gitignore` |
+| Downloads/sync | `curl`, `wget`, `rsync` |
+| Data/config | `jq`, `yq`, `plutil` |
+| JavaScript/TypeScript | `node`, `npm`, `npx`, `pnpm`, `prettier`, `eslint` |
+| Python/tool runners | `python3`, `uv`, `uvx` |
+| Shell/tool quality | `shellcheck`, `shfmt`, `sh`, `bash`, `zsh` |
+| Archives/compression | `tar`, `zip`, `unzip`, `gzip`, `gunzip`, `bzip2`, `bunzip2` |
+| Build/platform basics | `make`, `xcodebuild`, `swift`, `openssl`, `perl`, `ruby` |
+
+Important stable executable paths:
+
+| Tool | Stable path |
+| --- | --- |
+| `apply_patch` | `/Users/richard/Coding Tools/bin/apply_patch` |
+| `gitignore` | `/Users/richard/Coding Tools/bin/gitignore` |
+| `git` | `/Users/richard/Coding Tools/bin/git` |
+| `gh` | `/Users/richard/Coding Tools/bin/gh` |
+| `git-lfs` | `/Users/richard/Coding Tools/bin/git-lfs` |
+| `ssh` | `/Users/richard/Coding Tools/bin/ssh` |
+| `rg` | `/Users/richard/Coding Tools/bin/rg` |
+| `grep` | `/Users/richard/Coding Tools/bin/grep` |
+| `find` | `/Users/richard/Coding Tools/bin/find` |
+| `fd` | `/Users/richard/Coding Tools/bin/fd` |
+| `sed` | `/Users/richard/Coding Tools/bin/sed` |
+| `sd` | `/Users/richard/Coding Tools/bin/sd` |
+| `awk` | `/Users/richard/Coding Tools/bin/awk` |
+| `diff` | `/Users/richard/Coding Tools/bin/diff` |
+| `patch` | `/Users/richard/Coding Tools/bin/patch` |
+| `jq` | `/Users/richard/Coding Tools/bin/jq` |
+| `yq` | `/Users/richard/Coding Tools/bin/yq` |
+| `prettier` | `/Users/richard/Coding Tools/bin/prettier` |
+| `eslint` | `/Users/richard/Coding Tools/bin/eslint` |
+| `shellcheck` | `/Users/richard/Coding Tools/bin/shellcheck` |
+| `shfmt` | `/Users/richard/Coding Tools/bin/shfmt` |
+| `tree` | `/Users/richard/Coding Tools/bin/tree` |
+| `bat` | `/Users/richard/Coding Tools/bin/bat` |
+| `curl` | `/Users/richard/Coding Tools/bin/curl` |
+| `wget` | `/Users/richard/Coding Tools/bin/wget` |
+| `rsync` | `/Users/richard/Coding Tools/bin/rsync` |
+
+For any listed tool, the stable path is `/Users/richard/Coding Tools/bin/<tool>` and the owned subfolder path is `/Users/richard/Coding Tools/tools/<tool>/bin/<tool>`.
+
+Specialized machine-level tool note: Ghidra is installed on `study` only. Use `/Users/richard/.local/bin/ghidra` for the GUI wrapper, `/Users/richard/.local/bin/ghidra-headless` for headless analysis, and `/Users/richard/.local/share/alfred-tools/ghidra/ghidra_12.1.2_PUBLIC` for the underlying install. Do not document or assume Ghidra on `server` or `laptop` unless it is installed there in a later maintenance slice.
+
+<!-- ALFRED-CODING-TOOLS:END -->

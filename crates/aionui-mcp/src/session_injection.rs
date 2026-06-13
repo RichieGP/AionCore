@@ -110,7 +110,8 @@ pub struct ImageGenConfig {
 ///
 /// Looks for capabilities under `mcp_capabilities`, `mcpCapabilities`,
 /// or `mcp` keys. Returns default capabilities (stdio only) when the
-/// field is missing or not an object.
+/// field is missing or not an object. When a backend declares capabilities,
+/// each transport flag is respected independently.
 pub fn parse_acp_mcp_capabilities(response: &serde_json::Value) -> AcpMcpCapabilities {
     let caps = response
         .get("mcp_capabilities")
@@ -123,7 +124,7 @@ pub fn parse_acp_mcp_capabilities(response: &serde_json::Value) -> AcpMcpCapabil
 
     let http = bool_field(caps, "http");
     let sse = bool_field(caps, "sse");
-    let stdio = bool_field(caps, "stdio") || http || sse;
+    let stdio = bool_field(caps, "stdio");
 
     AcpMcpCapabilities { stdio, http, sse }
 }
@@ -345,7 +346,7 @@ mod tests {
             "mcp": { "stdio": false, "http": true, "sse": false }
         });
         let caps = parse_acp_mcp_capabilities(&resp);
-        assert!(caps.stdio);
+        assert!(!caps.stdio);
         assert!(caps.http);
         assert!(!caps.sse);
     }
@@ -369,14 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_http_support_implies_stdio() {
+    fn parse_http_support_does_not_imply_stdio() {
         let resp = serde_json::json!({
             "mcp_capabilities": { "http": true, "sse": false }
         });
         let caps = parse_acp_mcp_capabilities(&resp);
-        assert!(caps.stdio);
+        assert!(!caps.stdio);
         assert!(caps.http);
         assert!(!caps.sse);
+    }
+
+    #[test]
+    fn parse_sse_support_does_not_imply_stdio() {
+        let resp = serde_json::json!({
+            "mcp_capabilities": { "http": false, "sse": true }
+        });
+        let caps = parse_acp_mcp_capabilities(&resp);
+        assert!(!caps.stdio);
+        assert!(!caps.http);
+        assert!(caps.sse);
     }
 
     #[test]

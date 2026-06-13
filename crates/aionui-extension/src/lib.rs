@@ -10,7 +10,7 @@ pub mod error;
 pub mod external_paths;
 pub mod hub;
 pub mod hub_routes;
-mod kodo_discovery;
+pub mod kodo_discovery;
 pub mod lifecycle;
 pub mod loader;
 pub mod manifest;

@@ -926,8 +926,19 @@ impl ConversationService {
         // reference. Non-builtin agents must provide `agent_id`
         // explicitly — custom/extension rows have no unique lookup key
         // from `(backend, agent_source)` alone.
+        let mut resolved_agent_source = agent_source.to_owned();
         let resolved_agent_id = match agent_id_from_extra {
-            Some(id) => id.to_owned(),
+            Some(id) => {
+                if let Some(row) = self
+                    .agent_metadata_repo
+                    .get(id)
+                    .await
+                    .map_err(|e| ConversationError::internal(format!("agent_metadata lookup: {e}")))?
+                {
+                    resolved_agent_source = row.agent_source;
+                }
+                id.to_owned()
+            }
             None if !backend.is_empty() && agent_source == "builtin" => self
                 .agent_metadata_repo
                 .find_builtin_by_backend(backend)
@@ -941,7 +952,7 @@ impl ConversationService {
         let params = CreateAcpSessionParams {
             conversation_id,
             agent_backend: backend,
-            agent_source,
+            agent_source: &resolved_agent_source,
             agent_id: &resolved_agent_id,
         };
         self.acp_session_repo

@@ -152,6 +152,46 @@ pub fn normalize_acp_mcp_capabilities_for_backend(
     }
 }
 
+/// Normalize MCP capabilities for an ACP catalog row.
+///
+/// Some local ACP launchers advertise only network MCP transports in their
+/// handshake even though Aion can pass stdio MCP servers directly through the
+/// ACP `session/new` payload. Keep the backend allow-list, then add the same
+/// stdio support for known local ACP command rows.
+pub fn normalize_acp_mcp_capabilities_for_agent_row(
+    capabilities: AcpMcpCapabilities,
+    backend: Option<&str>,
+    command: Option<&str>,
+    binary_name: Option<&str>,
+    args: &[String],
+) -> AcpMcpCapabilities {
+    let capabilities = normalize_acp_mcp_capabilities_for_backend(capabilities, backend);
+    if capabilities.stdio || !agent_row_supports_stdio_mcp(command, binary_name, args) {
+        return capabilities;
+    }
+    AcpMcpCapabilities {
+        stdio: true,
+        ..capabilities
+    }
+}
+
+fn agent_row_supports_stdio_mcp(command: Option<&str>, binary_name: Option<&str>, args: &[String]) -> bool {
+    let command_name = command.or(binary_name).and_then(command_basename).unwrap_or_default();
+
+    match command_name {
+        "claude" | "codex" | "cursor" | "agent" | "qwen" | "gemini" | "opencode" | "aionrs" | "codebuddy" => true,
+        "kodo" => args.iter().any(|arg| arg == "acp"),
+        _ => false,
+    }
+}
+
+fn command_basename(command: &str) -> Option<&str> {
+    std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|part| part.strip_suffix(".exe").unwrap_or(part))
+}
+
 fn backend_supports_native_stdio_mcp(backend: &str) -> bool {
     matches!(
         backend,
@@ -452,6 +492,48 @@ mod tests {
             sse: false,
         };
         let normalized = normalize_acp_mcp_capabilities_for_backend(caps.clone(), Some("unknown"));
+        assert_eq!(normalized, caps);
+    }
+
+    #[test]
+    fn normalize_agent_row_enables_stdio_for_kodo_acp_custom_agent() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: false,
+        };
+        let args = vec!["acp".to_owned(), "--backend".to_owned(), "codex-ollama".to_owned()];
+
+        let normalized = normalize_acp_mcp_capabilities_for_agent_row(
+            caps,
+            None,
+            Some("/Users/richard/.local/bin/kodo"),
+            None,
+            &args,
+        );
+
+        assert!(normalized.stdio);
+        assert!(normalized.http);
+        assert!(!normalized.sse);
+    }
+
+    #[test]
+    fn normalize_agent_row_preserves_unknown_custom_agent() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: false,
+        };
+        let args = vec!["acp".to_owned()];
+
+        let normalized = normalize_acp_mcp_capabilities_for_agent_row(
+            caps.clone(),
+            None,
+            Some("/usr/local/bin/unknown-acp"),
+            None,
+            &args,
+        );
+
         assert_eq!(normalized, caps);
     }
 

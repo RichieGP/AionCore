@@ -13,7 +13,7 @@ use aionui_common::CommandSpec;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_mcp::{
-    AcpMcpCapabilities, McpProjectionKind, normalize_acp_mcp_capabilities_for_backend, parse_acp_mcp_capabilities,
+    AcpMcpCapabilities, McpProjectionKind, normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities,
     plan_mcp_projection,
 };
 use aionui_runtime::{
@@ -106,7 +106,13 @@ pub(super) async fn build(
         .as_ref()
         .map(parse_acp_mcp_capabilities)
         .unwrap_or_default();
-    let mcp_capabilities = normalize_acp_mcp_capabilities_for_backend(mcp_capabilities, meta.backend.as_deref());
+    let mcp_capabilities = normalize_acp_mcp_capabilities_for_agent_row(
+        mcp_capabilities,
+        meta.backend.as_deref(),
+        meta.command.as_deref(),
+        meta.agent_source_info.binary_name.as_deref(),
+        &meta.args,
+    );
 
     let user_mcp_servers = match deps.mcp_server_repo.as_ref() {
         Some(repo) => {
@@ -578,6 +584,83 @@ mod tests {
         .to_string()
     }
 
+    fn make_agent_meta(
+        backend: Option<&str>,
+        command: Option<&str>,
+        args: Vec<&str>,
+    ) -> aionui_api_types::AgentMetadata {
+        aionui_api_types::AgentMetadata {
+            id: "agent-1".into(),
+            icon: None,
+            name: "Test ACP".into(),
+            name_i18n: None,
+            description: None,
+            description_i18n: None,
+            backend: backend.map(str::to_owned),
+            agent_type: aionui_common::AgentType::Acp,
+            agent_source: aionui_api_types::AgentSource::Custom,
+            agent_source_info: aionui_api_types::AgentSourceInfo::default(),
+            enabled: true,
+            available: true,
+            command: command.map(str::to_owned),
+            resolved_command: None,
+            args: args.into_iter().map(str::to_owned).collect(),
+            env: vec![],
+            native_skills_dirs: None,
+            behavior_policy: aionui_api_types::BehaviorPolicy::default(),
+            yolo_id: None,
+            sort_order: 0,
+            team_capable: false,
+            handshake: aionui_api_types::AgentHandshake::default(),
+        }
+    }
+
+    #[test]
+    fn normalize_mcp_capabilities_enables_stdio_for_kodo_acp_custom_agent() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: false,
+        };
+        let meta = make_agent_meta(
+            None,
+            Some("/Users/richard/.local/bin/kodo"),
+            vec!["acp", "--backend", "codex-ollama"],
+        );
+
+        let normalized = normalize_acp_mcp_capabilities_for_agent_row(
+            caps,
+            meta.backend.as_deref(),
+            meta.command.as_deref(),
+            meta.agent_source_info.binary_name.as_deref(),
+            &meta.args,
+        );
+
+        assert!(normalized.stdio);
+        assert!(normalized.http);
+        assert!(!normalized.sse);
+    }
+
+    #[test]
+    fn normalize_mcp_capabilities_preserves_unknown_custom_agent() {
+        let caps = AcpMcpCapabilities {
+            stdio: false,
+            http: true,
+            sse: false,
+        };
+        let meta = make_agent_meta(None, Some("/usr/local/bin/unknown-acp"), vec!["acp"]);
+
+        let normalized = normalize_acp_mcp_capabilities_for_agent_row(
+            caps.clone(),
+            meta.backend.as_deref(),
+            meta.command.as_deref(),
+            meta.agent_source_info.binary_name.as_deref(),
+            &meta.args,
+        );
+
+        assert_eq!(normalized, caps);
+    }
+
     fn path_test_lock() -> &'static tokio::sync::Mutex<()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -954,7 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_user_mcp_servers_keeps_stdio_for_normalized_cursor_backend() {
-        let caps = normalize_acp_mcp_capabilities_for_backend(
+        let caps = aionui_mcp::normalize_acp_mcp_capabilities_for_backend(
             AcpMcpCapabilities {
                 stdio: false,
                 http: true,

@@ -32,7 +32,7 @@ use aionui_db::{
     UpsertConversationAssistantSnapshotParams,
 };
 use aionui_extension::AssistantRuleDispatcher;
-use aionui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
+use aionui_mcp::{AcpMcpCapabilities, normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities};
 use aionui_realtime::EventBroadcaster;
 use aionui_runtime::{RuntimeCommandProbe, probe_node_runtime_supported, probe_runtime_command, resolve_command_path};
 use std::collections::{HashMap, HashSet};
@@ -2938,7 +2938,35 @@ async fn resolve_acp_mcp_support_policy(
         .map(|value| parse_acp_mcp_capabilities(&value))
         .unwrap_or_default();
 
+    let capabilities = match row.as_ref() {
+        Some(row) => normalize_acp_mcp_capabilities_for_agent_row(
+            capabilities,
+            row.backend.as_deref(),
+            row.command.as_deref(),
+            agent_row_binary_name(row.agent_source_info.as_deref()).as_deref(),
+            &agent_row_args(row.args.as_deref()),
+        ),
+        None => capabilities,
+    };
+
     Ok(McpSupportPolicy::from_acp_capabilities(capabilities))
+}
+
+fn agent_row_args(raw_args: Option<&str>) -> Vec<String> {
+    raw_args
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
+}
+
+fn agent_row_binary_name(raw_source_info: Option<&str>) -> Option<String> {
+    raw_source_info
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| {
+            value
+                .get("binary_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
 }
 
 fn upsert_conversation_mcp_status(

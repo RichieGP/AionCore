@@ -13,8 +13,8 @@ use aionui_common::CommandSpec;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
 use aionui_mcp::{
-    AcpMcpCapabilities, McpProjectionKind, normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities,
-    plan_mcp_projection,
+    AcpMcpCapabilities, CursorAdapter, McpAgentAdapter, McpProjectionKind, McpServerTransport, QwenAdapter,
+    normalize_acp_mcp_capabilities_for_agent_row, parse_acp_mcp_capabilities, plan_mcp_projection,
 };
 use aionui_runtime::{
     ManagedAcpToolId, ensure_managed_acp_tool_with_reporter, ensure_node_runtime_with_reporter, ensure_runtime_command,
@@ -114,19 +114,22 @@ pub(super) async fn build(
         &meta.args,
     );
 
-    let user_mcp_servers = match deps.mcp_server_repo.as_ref() {
+    let user_mcp_rows = match deps.mcp_server_repo.as_ref() {
         Some(repo) => {
-            load_user_mcp_servers(
-                repo.as_ref(),
-                config.mcp_server_ids.as_deref(),
-                &ctx.conversation_id,
-                meta.backend.as_deref(),
-                &mcp_capabilities,
-            )
-            .await
+            load_selected_user_mcp_rows(repo.as_ref(), config.mcp_server_ids.as_deref(), &ctx.conversation_id).await
         }
         None => Vec::new(),
     };
+
+    sync_native_mcp_config_for_backend(&user_mcp_rows, &ctx.conversation_id, meta.backend.as_deref()).await;
+
+    let user_mcp_servers = load_user_mcp_servers(
+        &user_mcp_rows,
+        &ctx.conversation_id,
+        meta.backend.as_deref(),
+        &mcp_capabilities,
+    )
+    .await;
     let mut session_mcp_servers = user_mcp_servers;
     for server in &config.session_mcp_servers {
         if !session_server_supported_by_capabilities(server, &mcp_capabilities) {
@@ -323,13 +326,11 @@ async fn resolve_builtin_managed_acp_command_spec(
 /// are injected regardless of the current global `enabled` flag. Legacy
 /// conversations without a snapshot still fall back to "all enabled rows".
 /// Builtins are wired through other paths (e.g. team/guide MCP).
-async fn load_user_mcp_servers(
+async fn load_selected_user_mcp_rows(
     repo: &dyn IMcpServerRepository,
     selected_ids: Option<&[String]>,
     conversation_id: &str,
-    backend: Option<&str>,
-    capabilities: &AcpMcpCapabilities,
-) -> Vec<McpServer> {
+) -> Vec<McpServerRow> {
     let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
@@ -340,20 +341,103 @@ async fn load_user_mcp_servers(
             warn!(
                 conversation_id,
                 error = %err,
-                "user_mcp: list() failed; skipping injection"
+                "user_mcp: list() failed; skipping injection and native sync"
             );
             return Vec::new();
         }
     };
 
+    rows.into_iter()
+        .filter(|row| {
+            let selected = selected_ids
+                .map(|ids| ids.iter().any(|id| id == &row.id))
+                .unwrap_or(row.enabled);
+            selected && !row.builtin
+        })
+        .collect()
+}
+
+async fn sync_native_mcp_config_for_backend(rows: &[McpServerRow], conversation_id: &str, backend: Option<&str>) {
+    let adapter: Box<dyn McpAgentAdapter> = match backend {
+        Some("cursor") => Box::new(CursorAdapter) as Box<dyn McpAgentAdapter>,
+        Some("qwen") => Box::new(QwenAdapter) as Box<dyn McpAgentAdapter>,
+        _ => return,
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    match adapter.is_installed().await {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(
+                conversation_id,
+                backend = backend.unwrap_or("unknown"),
+                "user_mcp: native adapter not installed; skipping native config sync"
+            );
+            return;
+        }
+        Err(err) => {
+            warn!(
+                conversation_id,
+                backend = backend.unwrap_or("unknown"),
+                error = %err,
+                "user_mcp: failed native adapter install check; skipping native config sync"
+            );
+            return;
+        }
+    }
+
+    let mut synced = 0usize;
+    for row in rows {
+        let transport = match McpServerTransport::from_db(&row.transport_type, &row.transport_config) {
+            Ok(transport) => transport,
+            Err(err) => {
+                warn!(
+                    conversation_id,
+                    server_id = %row.id,
+                    server_name = %row.name,
+                    error = %err,
+                    "user_mcp: failed to parse transport for native config sync; skipping"
+                );
+                continue;
+            }
+        };
+
+        match adapter.install_server(&row.name, &transport).await {
+            Ok(()) => synced += 1,
+            Err(err) => {
+                warn!(
+                    conversation_id,
+                    server_id = %row.id,
+                    server_name = %row.name,
+                    backend = backend.unwrap_or("unknown"),
+                    error = %err,
+                    "user_mcp: failed native MCP config sync"
+                );
+            }
+        }
+    }
+
+    if synced > 0 {
+        info!(
+            conversation_id,
+            backend = backend.unwrap_or("unknown"),
+            count = synced,
+            "user_mcp: synced into native agent MCP config"
+        );
+    }
+}
+
+async fn load_user_mcp_servers(
+    rows: &[McpServerRow],
+    conversation_id: &str,
+    backend: Option<&str>,
+    capabilities: &AcpMcpCapabilities,
+) -> Vec<McpServer> {
     let mut servers = Vec::with_capacity(rows.len());
     for row in rows {
-        let selected = selected_ids
-            .map(|ids| ids.iter().any(|id| id == &row.id))
-            .unwrap_or(row.enabled);
-        if !selected || row.builtin {
-            continue;
-        }
         let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
         if projection.kind != McpProjectionKind::DirectSession {
             warn!(
@@ -941,7 +1025,7 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
@@ -960,7 +1044,7 @@ mod tests {
             rows: vec![],
             fail: true,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert!(servers.is_empty());
     }
 
@@ -979,7 +1063,7 @@ mod tests {
             ],
             fail: false,
         });
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
+        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
@@ -1004,7 +1088,8 @@ mod tests {
         });
 
         let selected = vec!["mcp_disabled-picked".to_owned()];
-        let servers = load_user_mcp_servers(repo.as_ref(), Some(&selected), "conv-1", Some("claude"), &caps).await;
+        let servers =
+            load_user_mcp_servers_from_repo(repo.as_ref(), Some(&selected), "conv-1", Some("claude"), &caps).await;
 
         assert_eq!(servers.len(), 1);
         match &servers[0] {
@@ -1031,7 +1116,7 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("unknown"), &caps).await;
+        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("unknown"), &caps).await;
         assert!(servers.is_empty());
     }
 
@@ -1056,7 +1141,18 @@ mod tests {
             fail: false,
         });
 
-        let servers = load_user_mcp_servers(repo.as_ref(), None, "conv-1", Some("cursor"), &caps).await;
+        let servers = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("cursor"), &caps).await;
         assert_eq!(servers.len(), 1);
+    }
+
+    async fn load_user_mcp_servers_from_repo(
+        repo: &dyn IMcpServerRepository,
+        selected_ids: Option<&[String]>,
+        conversation_id: &str,
+        backend: Option<&str>,
+        capabilities: &AcpMcpCapabilities,
+    ) -> Vec<McpServer> {
+        let rows = load_selected_user_mcp_rows(repo, selected_ids, conversation_id).await;
+        load_user_mcp_servers(&rows, conversation_id, backend, capabilities).await
     }
 }

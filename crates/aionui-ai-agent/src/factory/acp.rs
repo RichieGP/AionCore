@@ -451,7 +451,7 @@ async fn load_user_mcp_servers(
             );
             continue;
         }
-        match row_to_sdk_mcp_server(&row).await {
+        match row_to_sdk_mcp_server(row).await {
             Ok(server) => servers.push(server),
             Err(err) => {
                 warn!(

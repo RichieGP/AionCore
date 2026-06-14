@@ -775,7 +775,6 @@ impl ConversationService {
             };
             let selected_rows = rows
                 .into_iter()
-                .filter(|row| !row.builtin)
                 .filter(|row| match selected_mcp_server_ids.as_ref() {
                     Some(ids) => ids.iter().any(|id| id == &row.id),
                     None => row.enabled,

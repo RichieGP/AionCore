@@ -349,7 +349,6 @@ async fn resolve_builtin_managed_acp_command_spec(
 /// When `selected_ids` is present, those rows define the session snapshot and
 /// are injected regardless of the current global `enabled` flag. Legacy
 /// conversations without a snapshot still fall back to "all enabled rows".
-/// Builtins are wired through other paths (e.g. team/guide MCP).
 async fn load_selected_user_mcp_rows(
     repo: &dyn IMcpServerRepository,
     selected_ids: Option<&[String]>,
@@ -373,10 +372,9 @@ async fn load_selected_user_mcp_rows(
 
     rows.into_iter()
         .filter(|row| {
-            let selected = selected_ids
+            selected_ids
                 .map(|ids| ids.iter().any(|id| id == &row.id))
-                .unwrap_or(row.enabled);
-            selected && !row.builtin
+                .unwrap_or(row.enabled)
         })
         .collect()
 }
@@ -1551,7 +1549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_user_mcp_servers_skips_disabled_and_builtin() {
+    async fn load_user_mcp_servers_skips_disabled_and_keeps_enabled_builtin() {
         let stdio_config = stdio_config_for_existing_command();
         let caps = AcpMcpCapabilities {
             stdio: true,
@@ -1562,21 +1560,19 @@ mod tests {
             rows: vec![
                 make_row("user-enabled", "stdio", &stdio_config, true, false),
                 make_row("user-disabled", "stdio", &stdio_config, false, false),
-                make_row(
-                    "builtin",
-                    "stdio",
-                    r#"{"command":"img-gen","args":[],"env":{}}"#,
-                    true,
-                    true,
-                ),
+                make_row("builtin", "stdio", &stdio_config, true, true),
             ],
             fail: false,
         });
         let projected = load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-1", Some("claude"), &caps).await;
         let servers = projected.servers;
-        assert_eq!(servers.len(), 1);
+        assert_eq!(servers.len(), 2);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "user-enabled"),
+            _ => panic!("expected stdio"),
+        }
+        match &servers[1] {
+            McpServer::Stdio(s) => assert_eq!(s.name, "builtin"),
             _ => panic!("expected stdio"),
         }
     }

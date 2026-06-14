@@ -17,6 +17,7 @@ use tokio::sync::broadcast::error::TryRecvError;
 use super::agent::sdk_to_snake_value;
 use super::agent_close::STDERR_PEEK_LINES;
 use super::error_mapping::{AcpSendFailure, is_acp_session_not_found};
+use aionui_api_types::{AgentErrorCode, AgentErrorOwnership};
 use tracing::warn;
 
 #[derive(Debug)]
@@ -253,14 +254,23 @@ impl AcpAgentManager {
         // earlier turn cannot override a later benign empty turn.
         self.process.clear_stderr().await;
 
-        let prompt_response = self
-            .protocol
-            .prompt(PromptRequest::new(
-                SessionId::new(sid),
-                vec![ContentBlock::from(content)],
-            ))
-            .await
-            .map_err(AcpSendFailure::from)?;
+        let prompt_request = PromptRequest::new(SessionId::new(sid), vec![ContentBlock::from(content)]);
+        let prompt_response = if let Some(timeout) = self.qwen_mcp_prompt_timeout() {
+            match tokio::time::timeout(timeout, self.protocol.prompt(prompt_request)).await {
+                Ok(result) => result.map_err(AcpSendFailure::from)?,
+                Err(_) => {
+                    return Ok(PromptOutcome::TerminalError {
+                        session_id: sid.to_owned(),
+                        error: qwen_mcp_prompt_timeout_error(timeout),
+                    });
+                }
+            }
+        } else {
+            self.protocol
+                .prompt(prompt_request)
+                .await
+                .map_err(AcpSendFailure::from)?
+        };
 
         let empty_turn = is_empty_turn(&mut probe_rx);
         if empty_turn && let Some(error) = self.empty_turn_terminal_error().await {
@@ -339,6 +349,34 @@ impl AcpAgentManager {
         let tail = self.process.peek_stderr_tail(STDERR_PEEK_LINES).await;
         let detail = super::stderr_error_extractor::extract_error_message(&tail)?;
         Some(classify_empty_turn_stderr_error(&detail))
+    }
+
+    fn qwen_mcp_prompt_timeout(&self) -> Option<std::time::Duration> {
+        if self.params.metadata.backend.as_deref() != Some("qwen") || self.params.mcp_servers.is_empty() {
+            return None;
+        }
+        let secs = std::env::var("AION_QWEN_MCP_PROMPT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(60);
+        Some(std::time::Duration::from_secs(secs))
+    }
+}
+
+fn qwen_mcp_prompt_timeout_error(timeout: std::time::Duration) -> ErrorEventData {
+    ErrorEventData {
+        message: "Qwen did not produce output for an MCP-enabled turn before the timeout.".to_owned(),
+        code: Some(AgentErrorCode::UserLlmProviderTimeout),
+        ownership: Some(AgentErrorOwnership::UserLlmProvider),
+        detail: Some(format!(
+            "Qwen's local OpenAI/Ollama path can answer when its built-in tool surface is reduced, but MCP-enabled Qwen turns currently stall before producing tool output. Timed out after {} seconds.",
+            timeout.as_secs()
+        )),
+        workspace_path: None,
+        retryable: Some(true),
+        feedback_recommended: Some(false),
+        resolution: None,
     }
 }
 
@@ -818,6 +856,20 @@ mod tests {
         assert_eq!(error.code, Some(AgentErrorCode::UserLlmProviderBillingRequired));
         assert_eq!(error.retryable, Some(false));
         assert_eq!(error.feedback_recommended, Some(false));
+    }
+
+    #[test]
+    fn qwen_mcp_prompt_timeout_error_is_provider_timeout() {
+        let error = super::qwen_mcp_prompt_timeout_error(std::time::Duration::from_secs(60));
+
+        assert_eq!(error.code, Some(AgentErrorCode::UserLlmProviderTimeout));
+        assert_eq!(
+            error.ownership,
+            Some(aionui_api_types::AgentErrorOwnership::UserLlmProvider)
+        );
+        assert!(error.message.contains("Qwen"));
+        assert!(error.detail.as_deref().unwrap_or_default().contains("60 seconds"));
+        assert_eq!(error.retryable, Some(true));
     }
 
     #[test]

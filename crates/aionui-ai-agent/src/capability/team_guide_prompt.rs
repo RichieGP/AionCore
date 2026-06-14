@@ -99,12 +99,16 @@ mod tests {
         assert!(is_solo_team_guide_backend("codex"));
         assert!(is_solo_team_guide_backend("gemini"));
         assert!(is_solo_team_guide_backend("aionrs"));
+        assert!(is_solo_team_guide_backend("cursor"));
+        assert!(is_solo_team_guide_backend("opencode"));
+        assert!(is_solo_team_guide_backend("qwen"));
+        assert!(is_solo_team_guide_backend("codex-ollama"));
     }
 
     #[test]
     fn is_solo_team_guide_backend_rejects_unknown_and_empty() {
         assert!(!is_solo_team_guide_backend(""));
-        assert!(!is_solo_team_guide_backend("qwen"));
+        assert!(!is_solo_team_guide_backend("unknown"));
         assert!(!is_solo_team_guide_backend("Claude")); // case-sensitive
     }
 

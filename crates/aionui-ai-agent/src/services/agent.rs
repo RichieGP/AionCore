@@ -168,6 +168,26 @@ impl AgentService {
                 ]
             })
             .to_string();
+            let behavior_policy_json = serde_json::json!({
+                "supports_side_question": false,
+                "supports_team": true
+            })
+            .to_string();
+            let agent_capabilities_json = serde_json::json!({
+                "load_session": false,
+                "mcp_capabilities": {
+                    "stdio": true,
+                    "http": true,
+                    "sse": false
+                },
+                "prompt_capabilities": {
+                    "audio": false,
+                    "embedded_context": false,
+                    "image": false
+                },
+                "session_capabilities": {}
+            })
+            .to_string();
 
             let params = UpsertAgentMetadataParams {
                 id: &adapter.id,
@@ -185,9 +205,9 @@ impl AgentService {
                 args: Some(&args_json),
                 env: Some(&env_json),
                 native_skills_dirs: None,
-                behavior_policy: None,
+                behavior_policy: Some(&behavior_policy_json),
                 yolo_id: Some("full-access"),
-                agent_capabilities: None,
+                agent_capabilities: Some(&agent_capabilities_json),
                 auth_methods: None,
                 config_options: None,
                 available_modes: Some(&available_modes_json),

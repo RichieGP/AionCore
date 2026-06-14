@@ -31,7 +31,17 @@ pub const UPLOAD_MAX_SIZE: usize = 30 * 1024 * 1024;
 // --- Team mode ---
 
 /// Hard-coded backends that always support team mode, regardless of ACP capability detection.
-pub const TEAM_CAPABLE_BACKENDS: &[&str] = &["claude", "codex", "gemini", "aionrs", "codebuddy"];
+pub const TEAM_CAPABLE_BACKENDS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "aionrs",
+    "codebuddy",
+    "cursor",
+    "opencode",
+    "qwen",
+    "codex-ollama",
+];
 
 /// Determine if an agent supports team mode based on its persisted `agent_capabilities` JSON.
 ///

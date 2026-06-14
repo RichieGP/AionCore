@@ -28,6 +28,10 @@ struct KodoAionAdapter {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    avatar: Option<String>,
+    #[serde(default)]
     cli_command: Option<String>,
     #[serde(default)]
     default_cli_path: Option<String>,
@@ -118,7 +122,7 @@ fn adapters_from_kodo_json(raw: &str) -> Result<Vec<ResolvedAcpAdapter>, serde_j
                 default_cli_path,
                 acp_args: adapter.args,
                 env: HashMap::new(),
-                avatar: None,
+                avatar: adapter.icon.or(adapter.avatar),
                 auth_required: Some(false),
                 supports_streaming: adapter.supports_streaming,
                 connection_type: adapter.connection_type,
@@ -145,7 +149,8 @@ mod tests {
               "adapters": [
                 {
                   "id": "kodo-codex-ollama",
-                  "name": "Kodo Codex Ollama Qwen3 30B Private",
+                  "name": "Kodo CLI",
+                  "icon": "data:image/svg+xml;base64,PHN2Zy8+",
                   "source": "kodo-lane-registry",
                   "laneId": "codex-ollama",
                   "cliCommand": "kodo",
@@ -169,6 +174,11 @@ mod tests {
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].extension_name, "kodo-lane-registry");
         assert_eq!(adapters[0].id, "kodo-codex-ollama");
+        assert_eq!(adapters[0].name, "Kodo CLI");
+        assert_eq!(
+            adapters[0].avatar.as_deref(),
+            Some("data:image/svg+xml;base64,PHN2Zy8+")
+        );
         assert_eq!(adapters[0].cli_command.as_deref(), Some("kodo"));
         assert_eq!(
             adapters[0].default_cli_path.as_deref(),

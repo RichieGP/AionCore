@@ -499,7 +499,8 @@ pub async fn build_channel_state(
             agent_metadata_repo,
             acp_session_repo,
         )
-        .with_runtime_state(services.conversation_runtime_state.clone()),
+        .with_runtime_state(services.conversation_runtime_state.clone())
+        .with_mcp_audit_dir(services.data_dir.join("mcp-audit")),
     );
     conversation_svc.with_mcp_server_repo(Arc::new(aionui_db::SqliteMcpServerRepository::new(
         services.database.pool().clone(),
@@ -617,7 +618,8 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
         agent_metadata_repo,
         acp_session_repo,
     )
-    .with_runtime_state(services.conversation_runtime_state.clone());
+    .with_runtime_state(services.conversation_runtime_state.clone())
+    .with_mcp_audit_dir(services.data_dir.join("mcp-audit"));
     conv_service.with_mcp_server_repo(Arc::new(aionui_db::SqliteMcpServerRepository::new(
         services.database.pool().clone(),
     )));

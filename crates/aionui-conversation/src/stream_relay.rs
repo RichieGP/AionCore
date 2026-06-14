@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aionui_ai_agent::protocol::events::TipType;
@@ -110,6 +111,11 @@ impl StreamRelay {
     pub fn with_persistence(mut self, persistence: RuntimePersistenceCoordinator) -> Self {
         self.persistence = Some(persistence.clone());
         self.adapter = self.adapter.with_persistence(persistence);
+        self
+    }
+
+    pub fn with_mcp_audit_dir(mut self, mcp_audit_dir: PathBuf) -> Self {
+        self.adapter = self.adapter.with_mcp_audit_dir(mcp_audit_dir);
         self
     }
 
@@ -654,6 +660,7 @@ mod tests {
     use aionui_ai_agent::protocol::events::{ErrorEventData, FinishEventData, TextEventData, ThinkingEventData};
     use aionui_db::DbError;
     use aionui_db::models::MessageRow;
+    use std::fs;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1452,6 +1459,73 @@ mod tests {
             update_obj.get("raw_output").is_some(),
             "raw_output must be present after merge"
         );
+    }
+
+    #[tokio::test]
+    async fn run_acp_tool_call_enriches_cursor_generic_mcp_from_audit_log() {
+        use aionui_ai_agent::protocol::events::tool_call::{
+            AcpToolCallEventData, AcpToolCallSessionUpdateKind, AcpToolCallStatus, AcpToolCallUpdateData,
+        };
+
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(aionui_realtime::BroadcastEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+        let audit_dir = std::env::temp_dir().join(format!(
+            "aionui-cursor-mcp-audit-test-{}",
+            aionui_common::generate_short_id()
+        ));
+        fs::create_dir_all(&audit_dir).unwrap();
+        fs::write(
+            audit_dir.join("conv-1.jsonl"),
+            r#"{"event":"tools_call_response","server_name":"kodo-searcher","tool_name":"coding_sources_status","arguments":{"machine":"study","harness":"cursor"},"result":{"content":[{"type":"text","text":"{\"ok\":true}"}]}}"#,
+        )
+        .unwrap();
+
+        let relay = StreamRelay::new(
+            "conv-1".into(),
+            "asst-1".into(),
+            "turn-1".into(),
+            "user-1".into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        )
+        .with_mcp_audit_dir(audit_dir.clone());
+
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::AcpToolCall(AcpToolCallEventData {
+            session_id: "sess-1".into(),
+            update: AcpToolCallUpdateData {
+                session_update: AcpToolCallSessionUpdateKind::ToolCall,
+                tool_call_id: "atc-cursor".into(),
+                status: Some(AcpToolCallStatus::Completed),
+                title: Some("MCP: tool".into()),
+                kind: None,
+                raw_input: Some(json!({})),
+                raw_output: Some(json!({"success": true})),
+                content: None,
+                locations: None,
+            },
+            meta: None,
+        }))
+        .unwrap();
+
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        relay.consume(rx).await;
+
+        let inserts = repo.take_inserts();
+        let acp_msg = inserts.iter().find(|m| m.id == "atc-cursor").unwrap();
+        let content: serde_json::Value = serde_json::from_str(&acp_msg.content).unwrap();
+        let update = &content["update"];
+        assert_eq!(update["tool_name"], "coding_sources_status");
+        assert_eq!(update["server_name"], "kodo-searcher");
+        assert_eq!(update["display_title"], "kodo-searcher: coding_sources_status");
+        assert_eq!(update["raw_input"]["arguments"]["harness"], "cursor");
+        assert_eq!(update["mcp_audit"]["result"]["content"][0]["type"], "text");
+
+        let _ = fs::remove_dir_all(audit_dir);
     }
 
     #[tokio::test]

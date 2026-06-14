@@ -148,6 +148,7 @@ impl ConversationTurnOrchestrator {
             )
             .with_runtime_state(Arc::clone(&runtime_state))
             .with_persistence(persistence.clone())
+            .with_mcp_audit_dir(self.service.mcp_audit_dir())
             .with_turn_completion(false);
 
             let rx = agent.subscribe();

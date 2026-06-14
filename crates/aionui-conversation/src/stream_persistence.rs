@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aionui_ai_agent::protocol::events::{
@@ -10,6 +11,7 @@ use aionui_db::models::MessageRow;
 use aionui_db::{ConversationRowUpdate, DbError, IConversationRepository, MessageRowUpdate};
 use aionui_realtime::EventBroadcaster;
 use serde_json::json;
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, warn};
 
 use crate::runtime_completion::RuntimeCompletionPublisher;
@@ -70,6 +72,7 @@ pub(crate) struct StreamPersistenceAdapter {
     msg_id: String,
     repo: Arc<dyn IConversationRepository>,
     persistence: Option<RuntimePersistenceCoordinator>,
+    mcp_audit_dir: Option<PathBuf>,
 }
 
 impl StreamPersistenceAdapter {
@@ -84,11 +87,17 @@ impl StreamPersistenceAdapter {
             msg_id,
             repo,
             persistence,
+            mcp_audit_dir: None,
         }
     }
 
     pub fn with_persistence(mut self, persistence: RuntimePersistenceCoordinator) -> Self {
         self.persistence = Some(persistence);
+        self
+    }
+
+    pub fn with_mcp_audit_dir(mut self, mcp_audit_dir: PathBuf) -> Self {
+        self.mcp_audit_dir = Some(mcp_audit_dir);
         self
     }
 
@@ -479,7 +488,12 @@ impl StreamPersistenceAdapter {
 
         let mut value = serde_json::to_value(data).unwrap_or_default();
         normalize_keys_to_snake_case(&mut value);
+        if let Some(audit_dir) = &self.mcp_audit_dir {
+            enrich_acp_tool_call_from_mcp_audit(&mut value, audit_dir, &self.conversation_id);
+        }
         enrich_acp_tool_call_display_fields(&mut value);
+        let should_reconcile_mcp_audit =
+            self.mcp_audit_dir.is_some() && acp_tool_call_needs_mcp_audit_enrichment(&value);
         let content = value.to_string();
 
         match data.update.session_update {
@@ -539,6 +553,15 @@ impl StreamPersistenceAdapter {
                 }
             }
         }
+
+        if should_reconcile_mcp_audit {
+            for delay_ms in [50, 150, 300] {
+                sleep(Duration::from_millis(delay_ms)).await;
+                if self.reconcile_acp_tool_call_from_mcp_audit(tool_call_id).await {
+                    break;
+                }
+            }
+        }
     }
 
     /// Merge two JSON content strings: overlays non-null fields from `new_json`
@@ -580,6 +603,58 @@ impl StreamPersistenceAdapter {
             }
         }
         base.to_string()
+    }
+
+    async fn reconcile_acp_tool_call_from_mcp_audit(&self, tool_call_id: &str) -> bool {
+        let Some(audit_dir) = &self.mcp_audit_dir else {
+            return false;
+        };
+        let row = match self
+            .repo
+            .get_message_by_msg_id(&self.conversation_id, tool_call_id, "acp_tool_call")
+            .await
+        {
+            Ok(Some(row)) => row,
+            Ok(None) => return false,
+            Err(e) => {
+                debug!(
+                    conversation_id = %self.conversation_id,
+                    tool_call_id = %tool_call_id,
+                    error = %ErrorChain(&e),
+                    "Failed to load ACP tool call for MCP audit reconciliation"
+                );
+                return false;
+            }
+        };
+
+        let mut value: serde_json::Value = serde_json::from_str(&row.content).unwrap_or_default();
+        if !acp_tool_call_needs_mcp_audit_enrichment(&value) {
+            return true;
+        }
+        enrich_acp_tool_call_from_mcp_audit(&mut value, audit_dir, &self.conversation_id);
+        enrich_acp_tool_call_display_fields(&mut value);
+        if acp_tool_call_needs_mcp_audit_enrichment(&value) {
+            return false;
+        }
+
+        let content = value.to_string();
+        let update = MessageRowUpdate {
+            content: Some(content),
+            status: row.status.map(Some),
+            hidden: None,
+        };
+        match self.repo.update_message(&row.id, &update).await {
+            Ok(()) => true,
+            Err(e) => {
+                debug!(
+                    conversation_id = %self.conversation_id,
+                    tool_call_id = %tool_call_id,
+                    error = %ErrorChain(&e),
+                    "Failed to reconcile ACP tool call from MCP audit log"
+                );
+                false
+            }
+        }
     }
 
     /// Persist a tool_group event (array of tool summaries).
@@ -633,6 +708,14 @@ impl StreamPersistenceAdapter {
     }
 }
 
+fn acp_tool_call_needs_mcp_audit_enrichment(value: &serde_json::Value) -> bool {
+    let Some(update) = value.get("update").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let title = update.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+    is_generic_mcp_title(title) && update.get("mcp_audit").is_none() && derive_acp_tool_name(update).is_none()
+}
+
 fn enrich_acp_tool_call_display_fields(value: &mut serde_json::Value) {
     let Some(update) = value.get_mut("update").and_then(|v| v.as_object_mut()) else {
         return;
@@ -658,6 +741,69 @@ fn enrich_acp_tool_call_display_fields(value: &mut serde_json::Value) {
         };
         update.insert("display_title".to_owned(), serde_json::Value::String(display));
     }
+}
+
+fn enrich_acp_tool_call_from_mcp_audit(value: &mut serde_json::Value, audit_dir: &Path, conversation_id: &str) {
+    let Some(update) = value.get_mut("update").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let title = update.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+    if !is_generic_mcp_title(title) || derive_acp_tool_name(update).is_some() {
+        return;
+    }
+    let Some(audit) = latest_mcp_audit_call(audit_dir, conversation_id) else {
+        return;
+    };
+    if let Some(tool_name) = audit
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        update.insert("tool_name".to_owned(), serde_json::Value::String(tool_name.to_owned()));
+    }
+    if let Some(server_name) = audit
+        .get("server_name")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+    {
+        update.insert(
+            "server_name".to_owned(),
+            serde_json::Value::String(server_name.to_owned()),
+        );
+    }
+    update.insert("mcp_audit".to_owned(), audit.clone());
+
+    let raw_input_is_empty = update
+        .get("raw_input")
+        .is_none_or(|value| value.as_object().is_some_and(|obj| obj.is_empty()));
+    if raw_input_is_empty {
+        let mut raw_input = serde_json::Map::new();
+        if let Some(server_name) = audit.get("server_name").cloned() {
+            raw_input.insert("server_name".to_owned(), server_name);
+        }
+        if let Some(tool_name) = audit.get("tool_name").cloned() {
+            raw_input.insert("tool_name".to_owned(), tool_name);
+        }
+        if let Some(arguments) = audit.get("arguments").cloned() {
+            raw_input.insert("arguments".to_owned(), arguments);
+        }
+        update.insert("raw_input".to_owned(), serde_json::Value::Object(raw_input));
+    }
+}
+
+fn latest_mcp_audit_call(audit_dir: &Path, conversation_id: &str) -> Option<serde_json::Value> {
+    let path = audit_dir.join(format!("{conversation_id}.jsonl"));
+    let content = std::fs::read_to_string(path).ok()?;
+    content
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| {
+            matches!(
+                value.get("event").and_then(|v| v.as_str()),
+                Some("tools_call_response" | "tools_call_request")
+            )
+        })
 }
 
 fn is_generic_mcp_title(title: &str) -> bool {

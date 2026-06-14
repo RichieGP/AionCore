@@ -226,6 +226,7 @@ fn reject_deprecated_runtime_row(row: &ConversationRow) -> Result<(), Conversati
 #[derive(Clone)]
 pub struct ConversationService {
     workspace_root: PathBuf,
+    mcp_audit_dir: PathBuf,
     broadcaster: Arc<dyn EventBroadcaster>,
     skill_resolver: Arc<dyn SkillResolver>,
     task_manager: Arc<dyn IWorkerTaskManager>,
@@ -296,6 +297,7 @@ impl ConversationService {
         acp_session_repo: Arc<dyn IAcpSessionRepository>,
     ) -> Self {
         Self {
+            mcp_audit_dir: workspace_root.join("mcp-audit"),
             workspace_root,
             broadcaster,
             skill_resolver,
@@ -318,6 +320,15 @@ impl ConversationService {
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
         self.runtime_state = runtime_state;
         self
+    }
+
+    pub fn with_mcp_audit_dir(mut self, mcp_audit_dir: PathBuf) -> Self {
+        self.mcp_audit_dir = mcp_audit_dir;
+        self
+    }
+
+    pub(crate) fn mcp_audit_dir(&self) -> PathBuf {
+        self.mcp_audit_dir.clone()
     }
 
     pub fn with_cron_service(&self, cron_service: Option<Arc<dyn ICronService>>) {

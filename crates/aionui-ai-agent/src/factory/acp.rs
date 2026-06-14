@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -127,7 +128,13 @@ pub(super) async fn build(
         None => Vec::new(),
     };
 
-    sync_native_mcp_config_for_backend(&user_mcp_rows, &ctx.conversation_id, meta.backend.as_deref()).await;
+    sync_native_mcp_config_for_backend(
+        &user_mcp_rows,
+        &ctx.conversation_id,
+        meta.backend.as_deref(),
+        &deps.data_dir,
+    )
+    .await;
 
     let mcp_awareness_context = build_mcp_awareness_context(
         &user_mcp_rows,
@@ -374,7 +381,12 @@ async fn load_selected_user_mcp_rows(
         .collect()
 }
 
-async fn sync_native_mcp_config_for_backend(rows: &[McpServerRow], conversation_id: &str, backend: Option<&str>) {
+async fn sync_native_mcp_config_for_backend(
+    rows: &[McpServerRow],
+    conversation_id: &str,
+    backend: Option<&str>,
+    data_dir: &Path,
+) {
     let adapter: Box<dyn McpAgentAdapter> = match backend {
         Some("cursor") => Box::new(CursorAdapter) as Box<dyn McpAgentAdapter>,
         Some("qwen") => Box::new(QwenAdapter) as Box<dyn McpAgentAdapter>,
@@ -421,6 +433,19 @@ async fn sync_native_mcp_config_for_backend(rows: &[McpServerRow], conversation_
                 continue;
             }
         };
+        let transport = match cursor_native_audit_transport(row, transport, conversation_id, backend, data_dir).await {
+            Ok(transport) => transport,
+            Err(err) => {
+                warn!(
+                    conversation_id,
+                    server_id = %row.id,
+                    server_name = %row.name,
+                    error = %err,
+                    "user_mcp: failed to wrap Cursor native MCP config for audit; skipping"
+                );
+                continue;
+            }
+        };
 
         match adapter.install_server(&row.name, &transport).await {
             Ok(()) => synced += 1,
@@ -447,6 +472,62 @@ async fn sync_native_mcp_config_for_backend(rows: &[McpServerRow], conversation_
     }
 }
 
+async fn cursor_native_audit_transport(
+    row: &McpServerRow,
+    transport: McpServerTransport,
+    conversation_id: &str,
+    backend: Option<&str>,
+    data_dir: &Path,
+) -> Result<McpServerTransport, String> {
+    let McpServerTransport::Stdio { command, args, env } = transport else {
+        return Ok(transport);
+    };
+    if backend != Some("cursor") {
+        return Ok(McpServerTransport::Stdio { command, args, env });
+    }
+
+    let wrapper = write_stdio_mcp_audit_wrapper_script(data_dir)?;
+    let node = ensure_runtime_command("node")
+        .await
+        .map_err(|e| format!("failed to resolve node for Cursor MCP audit wrapper: {e}"))?;
+    let mut wrapper_args: Vec<String> = node
+        .args_prefix
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+    wrapper_args.push(wrapper.display().to_string());
+
+    let mut wrapper_env: HashMap<String, String> = node
+        .env
+        .iter()
+        .map(|(name, value)| (name.to_string_lossy().to_string(), value.to_string_lossy().to_string()))
+        .collect();
+    wrapper_env.insert("AION_MCP_AUDIT_SERVER_NAME".to_owned(), row.name.clone());
+    wrapper_env.insert("AION_MCP_AUDIT_COMMAND".to_owned(), command);
+    wrapper_env.insert(
+        "AION_MCP_AUDIT_ARGS_JSON".to_owned(),
+        serde_json::to_string(&args).map_err(|e| format!("failed to encode Cursor audit args: {e}"))?,
+    );
+    wrapper_env.insert(
+        "AION_MCP_AUDIT_ENV_JSON".to_owned(),
+        serde_json::to_string(&env).map_err(|e| format!("failed to encode Cursor audit env: {e}"))?,
+    );
+    wrapper_env.insert(
+        "AION_MCP_AUDIT_LOG".to_owned(),
+        data_dir
+            .join("mcp-audit")
+            .join(format!("{conversation_id}.jsonl"))
+            .display()
+            .to_string(),
+    );
+
+    Ok(McpServerTransport::Stdio {
+        command: node.program.display().to_string(),
+        args: wrapper_args,
+        env: wrapper_env,
+    })
+}
+
 struct ProjectedUserMcps {
     servers: Vec<McpServer>,
     proxy_processes: Vec<Arc<CliAgentProcess>>,
@@ -458,6 +539,7 @@ struct ProjectedProxyMcp {
 }
 
 const STDIO_HTTP_PROXY_SCRIPT: &str = include_str!("../../assets/stdio-to-streamable-http-proxy.mjs");
+const STDIO_MCP_AUDIT_WRAPPER_SCRIPT: &str = include_str!("../../assets/stdio-mcp-audit-wrapper.mjs");
 
 async fn start_stdio_http_proxy(
     row: &McpServerRow,
@@ -551,12 +633,11 @@ async fn start_stdio_http_proxy(
             .await
             .map_err(|e| format!("failed to spawn MCP proxy process: {e}"))?,
     );
-    wait_for_proxy_port(port).await.map_err(|err| {
+    wait_for_proxy_port(port).await.inspect_err(|_err| {
         let process = Arc::clone(&process);
         tokio::spawn(async move {
             let _ = process.kill(Duration::from_millis(250)).await;
         });
-        err
     })?;
     let url = format!("http://127.0.0.1:{port}/mcp");
     info!(
@@ -591,6 +672,15 @@ fn write_stdio_http_proxy_script(data_dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn write_stdio_mcp_audit_wrapper_script(data_dir: &Path) -> Result<PathBuf, String> {
+    let dir = data_dir.join("mcp-audit");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create MCP audit dir {}: {e}", dir.display()))?;
+    let path = dir.join("stdio-mcp-audit-wrapper.mjs");
+    fs::write(&path, STDIO_MCP_AUDIT_WRAPPER_SCRIPT)
+        .map_err(|e| format!("failed to write MCP audit wrapper script {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 fn env_to_json(env: &[EnvVariable]) -> Result<String, String> {
     let mut obj = serde_json::Map::new();
     for item in env {
@@ -622,18 +712,20 @@ async fn load_user_mcp_servers(
     for row in rows {
         let projection = plan_mcp_projection(backend, &row.transport_type, capabilities);
         match projection.kind {
-            McpProjectionKind::DirectSession => match row_to_sdk_mcp_server(row).await {
-                Ok(server) => servers.push(server),
-                Err(err) => {
-                    warn!(
-                        conversation_id,
-                        server_id = %row.id,
-                        server_name = %row.name,
-                        error = %err,
-                        "user_mcp: failed to convert row; skipping"
-                    );
+            McpProjectionKind::DirectSession => {
+                match row_to_sdk_mcp_server(row, backend, conversation_id, data_dir).await {
+                    Ok(server) => servers.push(server),
+                    Err(err) => {
+                        warn!(
+                            conversation_id,
+                            server_id = %row.id,
+                            server_name = %row.name,
+                            error = %err,
+                            "user_mcp: failed to convert row; skipping"
+                        );
+                    }
                 }
-            },
+            }
             McpProjectionKind::ProxyRequired => match start_stdio_http_proxy(row, conversation_id, data_dir).await {
                 Ok(projected) => {
                     servers.push(projected.server);
@@ -783,7 +875,12 @@ fn session_mcp_transport_label(transport: &SessionMcpTransport) -> &'static str 
 /// Convert an `McpServerRow` into the SDK `McpServer` shape used by
 /// `NewSessionRequest::mcp_servers`. Returns an error string when
 /// `transport_config` is malformed or required fields are missing.
-async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> {
+async fn row_to_sdk_mcp_server(
+    row: &McpServerRow,
+    backend: Option<&str>,
+    conversation_id: &str,
+    data_dir: &Path,
+) -> Result<McpServer, String> {
     let value: serde_json::Value =
         serde_json::from_str(&row.transport_config).map_err(|e| format!("invalid transport_config JSON: {e}"))?;
 
@@ -808,7 +905,42 @@ async fn row_to_sdk_mcp_server(row: &McpServerRow) -> Result<McpServer, String> 
                 })
                 .unwrap_or_default();
             env_entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let (resolved_command, args, env) = ensure_stdio_launch(command, &args, &env_entries).await?;
+            let (mut resolved_command, mut args, mut env) = ensure_stdio_launch(command, &args, &env_entries).await?;
+
+            if backend == Some("cursor") {
+                let wrapper = write_stdio_mcp_audit_wrapper_script(data_dir)?;
+                let node = ensure_runtime_command("node")
+                    .await
+                    .map_err(|e| format!("failed to resolve node for MCP audit wrapper: {e}"))?;
+                let original_command = resolved_command.display().to_string();
+                let original_args = args;
+                let original_env = env.clone();
+                resolved_command = node.program;
+                args = node
+                    .args_prefix
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().to_string())
+                    .collect();
+                args.push(wrapper.display().to_string());
+                env.extend(node.env.iter().map(|(name, value)| {
+                    EnvVariable::new(name.to_string_lossy().to_string(), value.to_string_lossy().to_string())
+                }));
+                env.push(EnvVariable::new("AION_MCP_AUDIT_SERVER_NAME", row.name.clone()));
+                env.push(EnvVariable::new("AION_MCP_AUDIT_COMMAND", original_command));
+                env.push(EnvVariable::new(
+                    "AION_MCP_AUDIT_ARGS_JSON",
+                    serde_json::to_string(&original_args).map_err(|e| format!("failed to encode audit args: {e}"))?,
+                ));
+                env.push(EnvVariable::new("AION_MCP_AUDIT_ENV_JSON", env_to_json(&original_env)?));
+                env.push(EnvVariable::new(
+                    "AION_MCP_AUDIT_LOG",
+                    data_dir
+                        .join("mcp-audit")
+                        .join(format!("{conversation_id}.jsonl"))
+                        .display()
+                        .to_string(),
+                ));
+            }
 
             let stdio = McpServerStdio::new(row.name.clone(), resolved_command)
                 .args(args)
@@ -1103,7 +1235,9 @@ mod tests {
             false,
         );
 
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+            .await
+            .expect("convert");
         unsafe { std::env::remove_var("AIONUI_BUNDLED_MANAGED_RESOURCES") };
         match server {
             McpServer::Stdio(s) => {
@@ -1180,7 +1314,9 @@ mod tests {
             true,
             false,
         );
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+            .await
+            .expect("convert");
         match server {
             McpServer::Stdio(s) => {
                 assert_eq!(s.name, "ctx7");
@@ -1208,7 +1344,9 @@ mod tests {
             true,
             false,
         );
-        let server = row_to_sdk_mcp_server(&row).await.expect("convert");
+        let server = row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+            .await
+            .expect("convert");
         match server {
             McpServer::Http(h) => {
                 assert_eq!(h.name, "remote");
@@ -1224,19 +1362,31 @@ mod tests {
     #[tokio::test]
     async fn row_to_sdk_unknown_transport_type_errors() {
         let row = make_row("bad", "websocket", "{}", true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(
+            row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn row_to_sdk_invalid_json_errors() {
         let row = make_row("bad", "stdio", "not-json", true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(
+            row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn row_to_sdk_stdio_missing_command_errors() {
         let row = make_row("bad", "stdio", r#"{"args":[]}"#, true, false);
-        assert!(row_to_sdk_mcp_server(&row).await.is_err());
+        assert!(
+            row_to_sdk_mcp_server(&row, Some("claude"), "conv-1", test_runtime_data_dir())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -1467,6 +1617,84 @@ mod tests {
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => assert_eq!(s.name, "good"),
+            _ => panic!("expected stdio"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_user_mcp_servers_wraps_cursor_stdio_with_audit_logger() {
+        let stdio_config = stdio_config_for_existing_command();
+        let caps = AcpMcpCapabilities {
+            stdio: true,
+            http: true,
+            sse: true,
+        };
+        let repo: Arc<dyn IMcpServerRepository> = Arc::new(MockRepo {
+            rows: vec![make_row("kodo-searcher", "stdio", &stdio_config, true, false)],
+            fail: false,
+        });
+        let projected =
+            load_user_mcp_servers_from_repo(repo.as_ref(), None, "conv-cursor", Some("cursor"), &caps).await;
+        let servers = projected.servers;
+        assert_eq!(servers.len(), 1);
+        match &servers[0] {
+            McpServer::Stdio(s) => {
+                assert_eq!(s.name, "kodo-searcher");
+                assert!(
+                    s.args.iter().any(|arg| arg.ends_with("stdio-mcp-audit-wrapper.mjs")),
+                    "Cursor MCP stdio server should launch through the audit wrapper"
+                );
+                let env: std::collections::HashMap<_, _> = s
+                    .env
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.value.as_str()))
+                    .collect();
+                assert_eq!(env.get("AION_MCP_AUDIT_SERVER_NAME"), Some(&"kodo-searcher"));
+                assert!(
+                    env.get("AION_MCP_AUDIT_LOG")
+                        .is_some_and(|path| path.ends_with("conv-cursor.jsonl"))
+                );
+            }
+            _ => panic!("expected stdio"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_native_audit_transport_wraps_stdio_config() {
+        let row = make_row(
+            "kodo-searcher",
+            "stdio",
+            &stdio_config_for_existing_command(),
+            true,
+            false,
+        );
+        let transport = McpServerTransport::from_db(&row.transport_type, &row.transport_config).unwrap();
+        let wrapped = cursor_native_audit_transport(
+            &row,
+            transport,
+            "conv-native-cursor",
+            Some("cursor"),
+            test_runtime_data_dir(),
+        )
+        .await
+        .expect("wrap");
+
+        match wrapped {
+            McpServerTransport::Stdio { command, args, env } => {
+                assert!(command.ends_with("node") || command.contains("node"));
+                assert!(
+                    args.iter().any(|arg| arg.ends_with("stdio-mcp-audit-wrapper.mjs")),
+                    "native Cursor MCP config should launch through the audit wrapper"
+                );
+                assert_eq!(
+                    env.get("AION_MCP_AUDIT_SERVER_NAME").map(String::as_str),
+                    Some("kodo-searcher")
+                );
+                assert!(
+                    env.get("AION_MCP_AUDIT_LOG")
+                        .is_some_and(|path| path.ends_with("conv-native-cursor.jsonl"))
+                );
+            }
             _ => panic!("expected stdio"),
         }
     }

@@ -84,6 +84,27 @@ impl TeamSessionService {
         has_mcp_capability(caps.as_ref())
     }
 
+    pub(crate) async fn custom_agent_team_defaults(
+        &self,
+        custom_agent_id: &str,
+    ) -> Option<(String, Option<String>, bool)> {
+        let row = self.agent_metadata_repo.get(custom_agent_id).await.ok()??;
+        if !row.enabled {
+            return None;
+        }
+        let bp_supports = row
+            .behavior_policy
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<BehaviorPolicy>(s).ok())
+            .is_some_and(|bp| bp.supports_team);
+        let caps = row
+            .agent_capabilities
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+        let capable = bp_supports || has_mcp_capability(caps.as_ref());
+        Some((row.agent_type.clone(), default_model_from_row(&row), capable))
+    }
+
     /// Return all backends currently team-capable (hard whitelist + behavior_policy + dynamically detected).
     /// Used to build the Lead prompt's `available_agent_types` list.
     pub(crate) async fn list_team_capable_backends(&self) -> Vec<(String, String)> {
@@ -111,7 +132,7 @@ impl TeamSessionService {
                 .and_then(|s| serde_json::from_str::<BehaviorPolicy>(s).ok())
                 .is_some_and(|bp| bp.supports_team);
             if bp_supports {
-                result.push((key, row.name.clone()));
+                result.push(format_spawn_catalog_entry(row, &key));
                 continue;
             }
 
@@ -129,7 +150,7 @@ impl TeamSessionService {
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
             if has_mcp_capability(caps.as_ref()) {
-                result.push((key, row.name.clone()));
+                result.push(format_spawn_catalog_entry(row, &key));
             }
         }
         // Ensure hard whitelist entries are present even if not in DB
@@ -168,19 +189,7 @@ impl TeamSessionService {
 
     pub(crate) async fn default_model_for_backend(&self, backend: &str) -> Option<String> {
         let row = self.agent_metadata_repo.find_builtin_by_backend(backend).await.ok()??;
-        let json: serde_json::Value = serde_json::from_str(row.available_models.as_deref()?).ok()?;
-        if let Some(id) = json.get("current_model_id").and_then(|v| v.as_str())
-            && !id.is_empty()
-        {
-            return Some(id.to_owned());
-        }
-        let arr = json
-            .get("available_models")
-            .and_then(|v| v.as_array())
-            .or_else(|| json.as_array())?;
-        arr.first()
-            .and_then(|e| e.get("id").and_then(|v| v.as_str()))
-            .map(|s| s.to_owned())
+        default_model_from_row(&row)
     }
 
     pub async fn spawn_agent_in_session(
@@ -241,6 +250,85 @@ fn capitalize(s: &str) -> String {
     match c.next() {
         None => String::new(),
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
+fn format_spawn_catalog_entry(row: &aionui_db::models::AgentMetadataRow, key: &str) -> (String, String) {
+    if row.agent_source != "builtin" {
+        let mut label = format!("{} (custom_agent_id: `{}`", row.name, row.id);
+        if let Some(model) = default_model_from_row(row) {
+            label.push_str(&format!(", model: `{model}`"));
+        }
+        label.push_str(&format!("; use agent_type `{}`)", row.agent_type));
+        return (row.agent_type.clone(), label);
+    }
+    (key.to_owned(), row.name.clone())
+}
+
+fn default_model_from_row(row: &aionui_db::models::AgentMetadataRow) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(row.available_models.as_deref()?).ok()?;
+    if let Some(id) = json.get("current_model_id").and_then(|v| v.as_str())
+        && !id.is_empty()
+    {
+        return Some(id.to_owned());
+    }
+    let arr = json
+        .get("available_models")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.as_array())?;
+    arr.first()
+        .and_then(|e| e.get("id").and_then(|v| v.as_str()))
+        .map(|s| s.to_owned())
+}
+
+#[cfg(test)]
+mod custom_agent_tests {
+    use super::*;
+    use aionui_db::models::AgentMetadataRow;
+
+    fn row() -> AgentMetadataRow {
+        AgentMetadataRow {
+            id: "kodo-codex-ollama".into(),
+            icon: None,
+            name: "Kodo CLI".into(),
+            name_i18n: None,
+            description: None,
+            description_i18n: None,
+            backend: Some("codex-ollama".into()),
+            agent_type: "acp".into(),
+            agent_source: "extension".into(),
+            agent_source_info: None,
+            enabled: true,
+            command: Some("/Users/richard/.local/bin/kodo".into()),
+            args: Some(r#"["acp","--backend","codex-ollama"]"#.into()),
+            env: None,
+            native_skills_dirs: None,
+            behavior_policy: Some(r#"{"supports_team":true}"#.into()),
+            yolo_id: None,
+            agent_capabilities: None,
+            auth_methods: None,
+            config_options: None,
+            available_modes: None,
+            available_models: Some(
+                r#"{"current_model_id":"qwen3-coder:30b-ctx64k","available_models":[{"id":"qwen3-coder:30b-ctx64k","label":"Qwen"}]}"#
+                    .into(),
+            ),
+            available_commands: None,
+            sort_order: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn custom_acp_rows_render_spawn_catalog_with_custom_agent_id() {
+        let row = row();
+        let (agent_type, label) = format_spawn_catalog_entry(&row, "codex-ollama");
+        assert_eq!(agent_type, "acp");
+        assert!(label.contains("Kodo CLI"));
+        assert!(label.contains("custom_agent_id: `kodo-codex-ollama`"));
+        assert!(label.contains("model: `qwen3-coder:30b-ctx64k`"));
+        assert!(label.contains("use agent_type `acp`"));
     }
 }
 

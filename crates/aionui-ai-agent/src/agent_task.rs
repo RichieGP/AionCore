@@ -19,6 +19,7 @@ use tokio::sync::broadcast;
 use crate::error::AgentError;
 use crate::manager::acp::AcpAgentManager;
 use crate::manager::aionrs::AionrsAgentManager;
+use crate::manager::codex_app_server::CodexAppServerAgentManager;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -150,6 +151,7 @@ pub trait IMockAgent: IAgentTask {
 #[derive(Clone)]
 pub enum AgentInstance {
     Acp(Arc<AcpAgentManager>),
+    CodexAppServer(Arc<CodexAppServerAgentManager>),
     Aionrs(Arc<AionrsAgentManager>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/team/app tests) to inject fake agents without
@@ -169,6 +171,7 @@ impl AgentInstance {
     pub fn as_task(&self) -> &dyn IAgentTask {
         match self {
             Self::Acp(m) => m.as_ref(),
+            Self::CodexAppServer(m) => m.as_ref(),
             Self::Aionrs(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
@@ -234,6 +237,7 @@ impl AgentInstance {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         match self {
             Self::Acp(m) => m.kill_and_wait(reason),
+            Self::CodexAppServer(m) => m.kill_and_wait(reason),
             Self::Aionrs(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Box::pin(std::future::ready(())),
@@ -254,6 +258,7 @@ impl AgentInstance {
     pub fn get_confirmations(&self) -> Vec<aionui_common::Confirmation> {
         match self {
             Self::Acp(m) => m.get_confirmations(),
+            Self::CodexAppServer(_) => Vec::new(),
             Self::Aionrs(m) => m.get_confirmations(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_confirmations(),
@@ -270,6 +275,9 @@ impl AgentInstance {
     ) -> Result<(), AgentError> {
         match self {
             Self::Acp(m) => m.confirm(msg_id, call_id, data, always_allow),
+            Self::CodexAppServer(_) => Err(AgentError::bad_request(
+                "Confirmations are not wired for Codex app-server yet",
+            )),
             Self::Aionrs(m) => m.confirm(msg_id, call_id, data, always_allow),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
@@ -280,6 +288,7 @@ impl AgentInstance {
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         match self {
             Self::Acp(_) => false,
+            Self::CodexAppServer(_) => false,
             Self::Aionrs(m) => m.check_approval(action, command_type),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.check_approval(action, command_type),
@@ -289,7 +298,7 @@ impl AgentInstance {
     /// Session key for test doubles that expose one.
     pub fn get_session_key(&self) -> Option<String> {
         match self {
-            Self::Acp(_) | Self::Aionrs(_) => None,
+            Self::Acp(_) | Self::CodexAppServer(_) | Self::Aionrs(_) => None,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_session_key(),
         }
@@ -299,27 +308,25 @@ impl AgentInstance {
     pub async fn get_mode(&self) -> Result<aionui_api_types::AgentModeResponse, AgentError> {
         match self {
             Self::Acp(m) => m.mode().await,
+            Self::CodexAppServer(m) => m.mode().await,
             Self::Aionrs(m) => m.mode().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.mode().await,
         }
     }
 
-    /// Set the session mode. Unsupported for variants other than ACP /
-    /// Aionrs — returns a `BadRequest` so the caller can surface an
-    /// actionable error rather than silently no-op.
+    /// Set the session mode.
     pub async fn set_mode(&self, mode: &str) -> Result<(), AgentError> {
         match self {
             Self::Acp(m) => m.set_mode(mode).await,
+            Self::CodexAppServer(m) => m.set_mode(mode).await,
             Self::Aionrs(m) => m.set_mode(mode).await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.set_mode(mode).await,
         }
     }
 
-    /// Get the current session model info. Only ACP exposes a model
-    /// catalog; other variants report `model_info = None` so the UI can
-    /// hide the model picker without an error.
+    /// Get the current session model info.
     pub async fn get_model(&self) -> Result<GetModelInfoResponse, AgentError> {
         match self {
             Self::Acp(m) => {
@@ -333,21 +340,21 @@ impl AgentInstance {
                 let model_info = merge_model_info(sdk_info, cc_switch_info);
                 Ok(GetModelInfoResponse { model_info })
             }
+            Self::CodexAppServer(m) => m.get_model().await,
             Self::Aionrs(_) => Ok(GetModelInfoResponse { model_info: None }),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_model().await,
         }
     }
 
-    /// Switch the active model. Unsupported for variants other than ACP —
-    /// returns a `BadRequest` so the caller can surface an actionable
-    /// error rather than silently no-op.
+    /// Switch the active model.
     pub async fn set_model(&self, model_id: &str) -> Result<(), AgentError> {
         if model_id.trim().is_empty() {
             return Err(AgentError::bad_request("model_id must not be empty"));
         }
         match self {
             Self::Acp(m) => m.set_model(model_id).await,
+            Self::CodexAppServer(m) => m.set_model(model_id).await,
             Self::Aionrs(_) => Err(AgentError::bad_request(
                 "Model switching is not supported for this agent type",
             )),
@@ -367,6 +374,10 @@ impl AgentInstance {
             Self::Acp(m) => Ok(GetModelInfoResponse {
                 model_info: Some(map_sdk_model_to_payload(m.set_model_confirmed(model_id).await?)),
             }),
+            Self::CodexAppServer(m) => {
+                m.set_model(model_id).await?;
+                m.get_model().await
+            }
             Self::Aionrs(_) => Err(AgentError::bad_request(
                 "Model switching is not supported for this agent type",
             )),
@@ -392,6 +403,7 @@ impl AgentInstance {
                 aionui_common::normalize_keys_to_snake_case(&mut value);
                 Ok(Some(value))
             }
+            Self::CodexAppServer(_) => Ok(None),
             Self::Aionrs(_) => Ok(None),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_usage().await,
@@ -404,6 +416,7 @@ impl AgentInstance {
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AgentError> {
         match self {
             Self::Acp(m) => m.load_slash_commands().await,
+            Self::CodexAppServer(_) => Ok(Vec::new()),
             Self::Aionrs(m) => m.get_slash_commands().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
@@ -431,6 +444,10 @@ impl AgentInstance {
                     answer: Some("Side question support will be fully wired in app integration phase.".into()),
                 })
             }
+            Self::CodexAppServer(_) => Ok(SideQuestionResponse {
+                status: "unsupported".into(),
+                answer: None,
+            }),
             Self::Aionrs(_) => Ok(SideQuestionResponse {
                 status: "unsupported".into(),
                 answer: None,

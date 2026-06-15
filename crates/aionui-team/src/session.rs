@@ -826,6 +826,19 @@ impl TeamSession {
             return Err(TeamError::DuplicateAgentName(requested_name));
         }
 
+        let service = self.service.upgrade();
+        let custom_defaults = match req.custom_agent_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            Some(custom_agent_id) => Some(
+                service
+                    .as_ref()
+                    .ok_or_else(|| TeamError::InvalidRequest("spawn_agent requires a live TeamSessionService".into()))?
+                    .custom_agent_team_defaults(custom_agent_id)
+                    .await
+                    .ok_or_else(|| TeamError::InvalidRequest(format!("unknown custom_agent_id: {custom_agent_id}")))?,
+            ),
+            None => None,
+        };
+
         // Step 3: backend capability check. Hard whitelist passes immediately;
         // otherwise query persisted agent_capabilities for MCP support.
         let backend = req
@@ -833,29 +846,33 @@ impl TeamSession {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(caller.backend.as_str())
-            .to_owned();
+            .map(str::to_owned)
+            .or_else(|| custom_defaults.as_ref().map(|(agent_type, _, _)| agent_type.clone()))
+            .unwrap_or_else(|| caller.backend.clone());
         if !crate::guide::capability::TEAM_CAPABLE_BACKENDS.contains(&backend.as_str()) {
-            let capable = match self.service.upgrade() {
-                Some(svc) => svc.is_backend_team_capable(&backend).await,
+            let custom_capable = custom_defaults.as_ref().is_some_and(|(_, _, capable)| *capable);
+            let dynamic_capable = match service.as_ref() {
+                Some(service) => service.is_backend_team_capable(&backend).await,
                 None => false,
             };
+            let capable = custom_capable || dynamic_capable;
             if !capable {
                 return Err(TeamError::BackendNotAllowed(backend));
             }
         }
 
         // Step 4: DB side-effects (new conversation + persisted agent slot).
-        let service = self
-            .service
-            .upgrade()
+        let service = service
             .ok_or_else(|| TeamError::InvalidRequest("spawn_agent requires a live TeamSessionService".into()))?;
         let model = match req.model.as_deref().filter(|m| !m.is_empty()) {
             Some(m) => m.to_owned(),
-            None => service
-                .default_model_for_backend(&backend)
-                .await
-                .unwrap_or_else(|| caller.model.clone()),
+            None => match custom_defaults.as_ref().and_then(|(_, model, _)| model.clone()) {
+                Some(model) => model,
+                None => service
+                    .default_model_for_backend(&backend)
+                    .await
+                    .unwrap_or_else(|| caller.model.clone()),
+            },
         };
         let new_agent = service
             .persist_spawned_agent(

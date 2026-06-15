@@ -2872,7 +2872,7 @@ async fn native_skills_dirs(
     agent_type: &AgentType,
     backend: Option<&serde_json::Value>,
 ) -> Option<Vec<String>> {
-    if *agent_type == AgentType::Acp
+    if matches!(agent_type, AgentType::Acp | AgentType::CodexAppServer)
         && let Some(serde_json::Value::String(vendor)) = backend
         && !vendor.is_empty()
     {

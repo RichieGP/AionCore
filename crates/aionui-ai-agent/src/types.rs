@@ -75,6 +75,17 @@ pub struct AionrsResolvedConfig {
     pub bedrock_config: Option<aion_config::config::BedrockConfig>,
 }
 
+/// Fully resolved native Codex app-server configuration.
+#[derive(Debug, Clone)]
+pub struct CodexAppServerResolvedConfig {
+    pub codex_bin: Option<String>,
+    pub codex_home: Option<String>,
+    pub model: Option<String>,
+    pub approval_policy: String,
+    pub sandbox_mode: String,
+    pub event_log_dir: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

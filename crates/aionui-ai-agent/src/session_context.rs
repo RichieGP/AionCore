@@ -1,4 +1,4 @@
-use aionui_api_types::{AcpBuildExtra, AionrsBuildExtra, TeamSessionBinding};
+use aionui_api_types::{AcpBuildExtra, AionrsBuildExtra, CodexAppServerBuildExtra, TeamSessionBinding};
 use aionui_common::{AgentType, ProviderWithModel};
 
 use crate::shared_kernel::PersistedSessionState;
@@ -40,6 +40,7 @@ pub struct WorkspaceContext {
 #[derive(Debug, Clone)]
 pub enum AgentSessionKind {
     Acp(Box<AcpSessionBuildContext>),
+    CodexAppServer(Box<CodexAppServerSessionBuildContext>),
     Aionrs(Box<AionrsSessionBuildContext>),
 }
 
@@ -57,6 +58,11 @@ pub struct AionrsSessionBuildContext {
     pub config: AionrsBuildExtra,
     pub team: Option<TeamSessionBinding>,
     pub belongs_to_team: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexAppServerSessionBuildContext {
+    pub config: CodexAppServerBuildExtra,
 }
 
 impl AgentSessionContext {

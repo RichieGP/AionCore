@@ -102,6 +102,29 @@ pub struct AionrsBuildExtra {
     pub user_id: Option<String>,
 }
 
+/// Native Codex app-server fields extracted from `extra` in build task options.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexAppServerBuildExtra {
+    #[serde(default)]
+    pub codex_bin: Option<String>,
+    #[serde(default)]
+    pub codex_home: Option<String>,
+    #[serde(default)]
+    pub approval_policy: Option<String>,
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub current_model_id: Option<String>,
+    #[serde(default)]
+    pub session_mode: Option<String>,
+    #[serde(default)]
+    pub current_mode_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
 fn default_aionrs_max_tokens() -> u32 {
     8192
 }

@@ -97,6 +97,13 @@ Every domain crate must follow:
 ## Code Style
 
 - Rust 2024 edition, stable toolchain (pinned in `rust-toolchain.toml`)
+- Use machine-level Rust tools from `/Users/richard/Coding Tools/bin`
+  (`rustup`, `cargo`, `rustc`, `rustfmt`, `cargo-clippy`,
+  `clippy-driver`, `rust-analyzer`). CI parity tools are `cargo-nextest`
+  and `cargo-audit`. Let `rustup` honor this repo's `rust-toolchain.toml`;
+  do not install repo-local Rust toolchains.
+- Run `just` recipes with `PATH="/Users/richard/Coding Tools/bin:$PATH"` so
+  recipe-internal commands resolve to the machine-level toolchain.
 - Comments in English, commit messages in English
 - Each `.rs` file follows single responsibility — one module, one concern
 - Max 1000 lines per `.rs` file; split into submodules when approaching the limit
@@ -251,11 +258,13 @@ Daily agent workbench paths:
 | Git/GitHub | `git`, `git-lfs`, `gh`, `ssh`, `gitignore` |
 | Downloads/sync | `curl`, `wget`, `rsync` |
 | Data/config | `jq`, `yq`, `plutil` |
-| JavaScript/TypeScript | `node`, `npm`, `npx`, `pnpm`, `prettier`, `eslint` |
-| Python/tool runners | `python3`, `uv`, `uvx` |
-| Shell/tool quality | `shellcheck`, `shfmt`, `sh`, `bash`, `zsh` |
+| JavaScript/TypeScript | `node`, `npm`, `npx`, `pnpm`, `bun`, `bunx`, `prettier`, `eslint`, `prek` |
+| Rust | `rustup`, `cargo`, `rustc`, `rustfmt`, `cargo-fmt`, `cargo-clippy`, `clippy-driver`, `rust-analyzer`, `cargo-nextest`, `cargo-audit` |
+| Python/tool runners | `python`, `python3`, `uv`, `uvx` |
+| Shell/tool quality | `shellcheck`, `shfmt`, `pwsh`, `sh`, `bash`, `zsh` |
 | Archives/compression | `tar`, `zip`, `unzip`, `gzip`, `gunzip`, `bzip2`, `bunzip2` |
-| Build/platform basics | `make`, `xcodebuild`, `swift`, `openssl`, `perl`, `ruby` |
+| Browser/app verification | `playwright` |
+| Build/platform basics | `make`, `xcodebuild`, `swift`, `just`, `openssl`, `perl`, `ruby`, `codesign`, `security`, `xcrun`, `productbuild`, `hdiutil`, `ditto`, `lipo`, `otool` |
 
 Important stable executable paths:
 
@@ -278,6 +287,35 @@ Important stable executable paths:
 | `patch` | `/Users/richard/Coding Tools/bin/patch` |
 | `jq` | `/Users/richard/Coding Tools/bin/jq` |
 | `yq` | `/Users/richard/Coding Tools/bin/yq` |
+| `node` | `/Users/richard/Coding Tools/bin/node` |
+| `npm` | `/Users/richard/Coding Tools/bin/npm` |
+| `npx` | `/Users/richard/Coding Tools/bin/npx` |
+| `pnpm` | `/Users/richard/Coding Tools/bin/pnpm` |
+| `bun` | `/Users/richard/Coding Tools/bin/bun` |
+| `bunx` | `/Users/richard/Coding Tools/bin/bunx` |
+| `playwright` | `/Users/richard/Coding Tools/bin/playwright` |
+| `prek` | `/Users/richard/Coding Tools/bin/prek` |
+| `rustup` | `/Users/richard/Coding Tools/bin/rustup` |
+| `cargo` | `/Users/richard/Coding Tools/bin/cargo` |
+| `rustc` | `/Users/richard/Coding Tools/bin/rustc` |
+| `rustfmt` | `/Users/richard/Coding Tools/bin/rustfmt` |
+| `cargo-fmt` | `/Users/richard/Coding Tools/bin/cargo-fmt` |
+| `cargo-clippy` | `/Users/richard/Coding Tools/bin/cargo-clippy` |
+| `cargo-nextest` | `/Users/richard/Coding Tools/bin/cargo-nextest` |
+| `cargo-audit` | `/Users/richard/Coding Tools/bin/cargo-audit` |
+| `clippy-driver` | `/Users/richard/Coding Tools/bin/clippy-driver` |
+| `rust-analyzer` | `/Users/richard/Coding Tools/bin/rust-analyzer` |
+| `pwsh` | `/Users/richard/Coding Tools/bin/pwsh` |
+| `python` | `/Users/richard/Coding Tools/bin/python` |
+| `python3` | `/Users/richard/Coding Tools/bin/python3` |
+| `codesign` | `/Users/richard/Coding Tools/bin/codesign` |
+| `security` | `/Users/richard/Coding Tools/bin/security` |
+| `xcrun` | `/Users/richard/Coding Tools/bin/xcrun` |
+| `productbuild` | `/Users/richard/Coding Tools/bin/productbuild` |
+| `hdiutil` | `/Users/richard/Coding Tools/bin/hdiutil` |
+| `ditto` | `/Users/richard/Coding Tools/bin/ditto` |
+| `lipo` | `/Users/richard/Coding Tools/bin/lipo` |
+| `otool` | `/Users/richard/Coding Tools/bin/otool` |
 | `prettier` | `/Users/richard/Coding Tools/bin/prettier` |
 | `eslint` | `/Users/richard/Coding Tools/bin/eslint` |
 | `shellcheck` | `/Users/richard/Coding Tools/bin/shellcheck` |

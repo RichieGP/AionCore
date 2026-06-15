@@ -186,6 +186,11 @@ async fn collect_idle_ignores_aionrs_agent_type() {
                 team: None,
                 belongs_to_team: false,
             })),
+            AgentType::CodexAppServer => {
+                AgentSessionKind::CodexAppServer(Box::new(CodexAppServerSessionBuildContext {
+                    config: Default::default(),
+                }))
+            }
             AgentType::Gemini
             | AgentType::OpenclawGateway
             | AgentType::Remote
@@ -223,13 +228,19 @@ async fn collect_idle_ignores_aionrs_agent_type() {
     mgr.get_or_build_task("aionrs-1", make_opts(AgentType::Aionrs, "aionrs-1"))
         .await
         .unwrap();
+    mgr.get_or_build_task(
+        "codex-app-server-1",
+        make_opts(AgentType::CodexAppServer, "codex-app-server-1"),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(mgr.active_count(), 2);
+    assert_eq!(mgr.active_count(), 3);
 
-    // Only ACP should be collected
-    let idle = mgr.collect_idle(300_000); // 5-min threshold
-    assert_eq!(idle.len(), 1);
-    assert_eq!(idle[0], "acp-1");
+    // Subprocess-backed ACP and Codex app-server tasks are collectible; aionrs is not.
+    let mut idle = mgr.collect_idle(300_000); // 5-min threshold
+    idle.sort();
+    assert_eq!(idle, vec!["acp-1".to_owned(), "codex-app-server-1".to_owned()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +327,7 @@ fn agent_type_serde_all_variants() {
     // Verify that all AgentType variants serialize/deserialize correctly
     for (variant, expected_json) in [
         (AgentType::Acp, "\"acp\""),
+        (AgentType::CodexAppServer, "\"codex-app-server\""),
         (AgentType::OpenclawGateway, "\"openclaw-gateway\""),
         (AgentType::Nanobot, "\"nanobot\""),
         (AgentType::Remote, "\"remote\""),

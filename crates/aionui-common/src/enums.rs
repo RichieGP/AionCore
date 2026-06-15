@@ -7,6 +7,8 @@ use crate::id::fnv1a_hex8;
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
     Acp,
+    #[serde(rename = "codex-app-server")]
+    CodexAppServer,
     #[serde(rename = "openclaw-gateway")]
     OpenclawGateway,
     Nanobot,
@@ -30,6 +32,7 @@ impl AgentType {
     pub fn display_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "ACP",
+            AgentType::CodexAppServer => "Codex App Server",
             AgentType::OpenclawGateway => "OpenClaw Gateway",
             AgentType::Nanobot => "Nanobot",
             AgentType::Remote => "Remote",
@@ -42,6 +45,7 @@ impl AgentType {
     pub fn serde_name(&self) -> &'static str {
         match self {
             AgentType::Acp => "acp",
+            AgentType::CodexAppServer => "codex-app-server",
             AgentType::OpenclawGateway => "openclaw-gateway",
             AgentType::Nanobot => "nanobot",
             AgentType::Remote => "remote",
@@ -52,7 +56,7 @@ impl AgentType {
     }
 
     pub fn supports_new_conversation(&self) -> bool {
-        matches!(self, AgentType::Acp | AgentType::Aionrs)
+        matches!(self, AgentType::Acp | AgentType::CodexAppServer | AgentType::Aionrs)
     }
 
     pub fn is_deprecated_runtime(&self) -> bool {
@@ -85,6 +89,7 @@ impl AgentType {
         match self {
             AgentType::Aionrs => Some(&[".aionrs/skills"]),
             AgentType::Acp
+            | AgentType::CodexAppServer
             | AgentType::OpenclawGateway
             | AgentType::Nanobot
             | AgentType::Remote
@@ -115,6 +120,7 @@ impl AgentType {
                 Some("cursor") => "agent",
                 _ => "yolo",
             },
+            AgentType::CodexAppServer => "full-access",
             AgentType::Aionrs
             | AgentType::Gemini
             | AgentType::Codex
@@ -312,6 +318,7 @@ mod tests {
         assert_eq!(AgentType::Nanobot.display_name(), "Nanobot");
         assert_eq!(AgentType::Remote.display_name(), "Remote");
         assert_eq!(AgentType::Acp.display_name(), "ACP");
+        assert_eq!(AgentType::CodexAppServer.display_name(), "Codex App Server");
         assert_eq!(AgentType::Codex.display_name(), "Codex (legacy)");
     }
 
@@ -327,6 +334,7 @@ mod tests {
     fn test_agent_type_id_unique_per_variant() {
         let ids: Vec<String> = [
             AgentType::Acp,
+            AgentType::CodexAppServer,
             AgentType::OpenclawGateway,
             AgentType::Nanobot,
             AgentType::Remote,
@@ -353,6 +361,7 @@ mod tests {
     fn test_agent_type_all_variants() {
         let cases = [
             (AgentType::Acp, "acp"),
+            (AgentType::CodexAppServer, "codex-app-server"),
             (AgentType::OpenclawGateway, "openclaw-gateway"),
             (AgentType::Nanobot, "nanobot"),
             (AgentType::Remote, "remote"),
@@ -370,6 +379,7 @@ mod tests {
     #[test]
     fn agent_type_new_conversation_support_policy_is_explicit() {
         assert!(AgentType::Acp.supports_new_conversation());
+        assert!(AgentType::CodexAppServer.supports_new_conversation());
         assert!(AgentType::Aionrs.supports_new_conversation());
 
         assert!(!AgentType::Gemini.supports_new_conversation());
@@ -382,6 +392,7 @@ mod tests {
     #[test]
     fn agent_type_deprecated_runtime_policy_matches_new_conversation_support() {
         assert!(!AgentType::Acp.is_deprecated_runtime());
+        assert!(!AgentType::CodexAppServer.is_deprecated_runtime());
         assert!(!AgentType::Aionrs.is_deprecated_runtime());
 
         assert!(AgentType::Gemini.is_deprecated_runtime());
@@ -480,6 +491,7 @@ mod tests {
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("gemini")), "yolo");
         assert_eq!(AgentType::Acp.full_auto_mode_id(Some("hermes")), "default");
         assert_eq!(AgentType::Acp.full_auto_mode_id(None), "yolo");
+        assert_eq!(AgentType::CodexAppServer.full_auto_mode_id(None), "full-access");
         assert_eq!(AgentType::Aionrs.full_auto_mode_id(None), "yolo");
         assert_eq!(AgentType::Remote.full_auto_mode_id(None), "yolo");
     }

@@ -154,6 +154,7 @@ fn test_paginated_result_empty() {
 fn test_enum_serde_roundtrip() {
     let roundtrip_cases: Vec<(&str, AgentType)> = vec![
         (r#""acp""#, AgentType::Acp),
+        (r#""codex-app-server""#, AgentType::CodexAppServer),
         (r#""nanobot""#, AgentType::Nanobot),
         (r#""openclaw-gateway""#, AgentType::OpenclawGateway),
     ];

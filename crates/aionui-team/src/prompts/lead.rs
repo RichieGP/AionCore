@@ -164,8 +164,8 @@ fn render_available_assistants_section(assistants: &[AvailableAssistant]) -> Str
          fit.\n\
          3. If no preset matches the task, fall back to a generic CLI agent from the \
          \"Available Agent Types\" section.\n\n\
-         Pass the preset's ID as `custom_agent_id` to `team_spawn_agent`. The `agent_type` is \
-         derived from the preset's backend and does not need to be specified.",
+         Pass the preset's ID as `custom_agent_id` to `team_spawn_agent`. The `agent_type` and \
+         default model are derived from catalog metadata and do not need to be specified.",
     );
     out
 }

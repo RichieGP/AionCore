@@ -173,7 +173,7 @@ impl IWorkerTaskManager for WorkerTaskManagerImpl {
             .filter_map(|entry| {
                 let agent = entry.value().get()?;
                 // Only ACP agents participate in idle cleanup per API Spec
-                (agent.agent_type() == AgentType::Acp
+                (matches!(agent.agent_type(), AgentType::Acp | AgentType::CodexAppServer)
                     && agent.status() == Some(ConversationStatus::Finished)
                     && (now - agent.last_activity_at()) > idle_threshold_ms)
                     .then(|| entry.key().clone())

@@ -164,7 +164,11 @@ async fn t1_1_create_with_defaults() {
 async fn t1_2_create_each_agent_type() {
     let (svc, _, _task_mgr) = setup().await;
 
-    let types = vec![("acp", AgentType::Acp), ("aionrs", AgentType::Aionrs)];
+    let types = vec![
+        ("acp", AgentType::Acp),
+        ("codex-app-server", AgentType::CodexAppServer),
+        ("aionrs", AgentType::Aionrs),
+    ];
 
     for (type_str, expected_type) in types {
         let body = if type_str == "aionrs" {

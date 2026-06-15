@@ -2,6 +2,7 @@ pub mod acp_assembler;
 
 mod acp;
 pub(crate) mod aionrs;
+mod codex_app_server;
 mod context;
 
 use std::path::PathBuf;
@@ -67,6 +68,9 @@ async fn build_agent(deps: Arc<AgentFactoryDeps>, options: BuildTaskOptions) -> 
     let model = context.model.clone();
     match context.kind {
         AgentSessionKind::Acp(acp_context) => acp::build(deps, *acp_context, ctx).await,
+        AgentSessionKind::CodexAppServer(codex_context) => {
+            codex_app_server::build(deps, *codex_context, model, ctx).await
+        }
         AgentSessionKind::Aionrs(aionrs_context) => aionrs::build(deps, *aionrs_context, model, ctx).await,
     }
 }

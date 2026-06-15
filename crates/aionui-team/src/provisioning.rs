@@ -108,6 +108,7 @@ impl TeamAgentProvisioner {
                     &input.model,
                     input.conversation_id.as_deref(),
                     shared_workspace,
+                    input.custom_agent_id.as_deref(),
                 )
                 .await?;
             agents.push(TeamAgent {
@@ -260,6 +261,7 @@ impl TeamAgentProvisioner {
                 &input.model,
                 None,
                 input.workspace.as_deref(),
+                input.custom_agent_id.as_deref(),
             )
             .await?;
         Ok(TeamAgent {
@@ -288,9 +290,10 @@ impl TeamAgentProvisioner {
         model: &str,
         existing_conversation_id: Option<&str>,
         workspace: Option<&str>,
+        custom_agent_id: Option<&str>,
     ) -> Result<String, TeamError> {
         let extra = self
-            .build_team_extra(team_id, slot_id, role, backend, model, workspace)
+            .build_team_extra(team_id, slot_id, role, backend, model, workspace, custom_agent_id)
             .await?;
         if let Some(existing_id) = existing_conversation_id {
             self.conversation_port
@@ -373,6 +376,7 @@ impl TeamAgentProvisioner {
         backend: &str,
         model: &str,
         workspace: Option<&str>,
+        custom_agent_id: Option<&str>,
     ) -> Result<serde_json::Value, TeamError> {
         let mut extra = serde_json::json!({
             "teamId": team_id,
@@ -386,6 +390,10 @@ impl TeamAgentProvisioner {
         }
         if let Some(workspace) = workspace {
             inherit_team_workspace(&mut extra, workspace);
+        }
+        if let Some(custom_agent_id) = custom_agent_id.filter(|value| !value.is_empty()) {
+            extra["agent_id"] = serde_json::Value::String(custom_agent_id.to_owned());
+            extra["custom_agent_id"] = serde_json::Value::String(custom_agent_id.to_owned());
         }
         Ok(extra)
     }

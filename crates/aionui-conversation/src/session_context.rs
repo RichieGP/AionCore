@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aionui_ai_agent::session_context::{
-    AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, AionrsSessionBuildContext, ConversationContext,
-    WorkspaceContext,
+    AcpSessionBuildContext, AgentSessionContext, AgentSessionKind, AionrsSessionBuildContext,
+    CodexAppServerSessionBuildContext, ConversationContext, WorkspaceContext,
 };
 use aionui_ai_agent::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState};
 use aionui_ai_agent::types::BuildTaskOptions;
-use aionui_api_types::{AcpBuildExtra, AionrsBuildExtra, TeamSessionBinding};
+use aionui_api_types::{AcpBuildExtra, AionrsBuildExtra, CodexAppServerBuildExtra, TeamSessionBinding};
 use aionui_common::{AgentType, WorkspacePathValidationError, validate_workspace_path_availability};
 use aionui_db::models::ConversationRow;
 use aionui_db::{IAcpSessionRepository, IAgentMetadataRepository};
@@ -160,6 +160,9 @@ impl<'a> SessionContextBuilder<'a> {
                 .build_acp_context(row, extra, team)
                 .await
                 .map(|context| AgentSessionKind::Acp(Box::new(context))),
+            AgentType::CodexAppServer => Ok(AgentSessionKind::CodexAppServer(Box::new(
+                build_codex_app_server_context(row, extra)?,
+            ))),
             AgentType::Aionrs => Ok(AgentSessionKind::Aionrs(Box::new(build_aionrs_context(
                 row, extra, team,
             )))),
@@ -324,6 +327,18 @@ fn build_aionrs_context(
         team,
         belongs_to_team,
     }
+}
+
+fn build_codex_app_server_context(
+    row: &ConversationRow,
+    extra: serde_json::Value,
+) -> Result<CodexAppServerSessionBuildContext, ConversationError> {
+    let mut config: CodexAppServerBuildExtra =
+        serde_json::from_value(extra).map_err(|e| ConversationError::BadRequest {
+            reason: format!("Invalid Codex app-server build options: {e}"),
+        })?;
+    config.user_id.get_or_insert_with(|| row.user_id.clone());
+    Ok(CodexAppServerSessionBuildContext { config })
 }
 
 fn apply_team_seed_to_acp_config(team: &Option<TeamSessionBinding>, config: &mut AcpBuildExtra) {

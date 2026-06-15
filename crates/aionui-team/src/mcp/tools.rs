@@ -39,7 +39,7 @@ Use this to:
 - See all available agent types and their models at once
 - Verify a model ID is valid for a given agent type
 
-Pass agent_type to query a specific backend, or omit it to see all.";
+Pass agent_type or custom_agent_id to query a specific catalog entry, or omit it to see all.";
 
 /// Description for `team_describe_assistant` — verbatim from team-prompts.md §5.2.
 pub const TEAM_DESCRIBE_ASSISTANT_DESCRIPTION: &str =
@@ -86,7 +86,7 @@ pub fn all_tool_descriptors() -> Vec<ToolDescriptor> {
                     "name": { "type": "string", "description": "Agent display name" },
                     "agent_type": { "type": "string", "description": "Agent type/backend to use (e.g. \"claude\", \"codex\", \"codebuddy\", \"gemini\"). Query team_list_models first to see available options." },
                     "model": { "type": "string", "description": "Specific model ID to use (e.g. \"claude-sonnet-4\"). Must be a valid model for the chosen agent_type. Query team_list_models to see available models." },
-                    "custom_agent_id": { "type": "string", "description": "Preset assistant ID to spawn (from the Available Preset Assistants catalog). When set, agent_type is derived from the preset's backend." },
+                    "custom_agent_id": { "type": "string", "description": "Preset assistant ID to spawn (from the Available Preset Assistants catalog). When set, agent_type and default model are derived from the catalog metadata." },
                     "backend": { "type": "string", "description": "Legacy alias for agent_type. Prefer agent_type." },
                     "role": { "type": "string", "description": "Agent role (default: 'teammate')" }
                 },
@@ -375,7 +375,7 @@ pub fn build_list_models_from_rows(
             Some(b) => b.to_owned(),
             None => row.agent_type.clone(),
         };
-        let is_internal = row.backend.is_none();
+        let is_internal = row.backend.is_none() || row.agent_source == "internal";
 
         // Check team capability: behavior_policy.supports_team OR legacy whitelist+MCP detection
         let bp_supports = row
@@ -396,7 +396,22 @@ pub fn build_list_models_from_rows(
         // Apply agent_type filter
         if let Some(filter) = agent_type_filter
             && key != filter
+            && row.agent_type != filter
+            && row.id != filter
         {
+            continue;
+        }
+
+        // Custom ACP rows (for example Kodo CLI) must be spawned by
+        // custom_agent_id; their backend is a row-local implementation detail.
+        if row.agent_source != "builtin" && !is_internal {
+            agent_types.push(json!({
+                "type": row.agent_type,
+                "name": row.name,
+                "custom_agent_id": row.id,
+                "backend": row.backend,
+                "models": models_from_agent_metadata_row(row),
+            }));
             continue;
         }
 
@@ -409,47 +424,43 @@ pub fn build_list_models_from_rows(
             continue;
         }
 
-        // Parse available_models from DB.
-        // Format is either:
-        //   {"current_model_id":"...", "available_models": [{"id":"...", "label":"..."}]}
-        // or legacy array:
-        //   [{"id":"...", "name":"..."}]
-        let models: Vec<String> = row
-            .available_models
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .and_then(|v| {
-                // Try object with "available_models" key first (ModelInfoPayload format)
-                if let Some(arr) = v.get("available_models").and_then(Value::as_array) {
-                    let ids: Vec<String> = arr
-                        .iter()
-                        .filter_map(|e| e.get("id").and_then(Value::as_str).map(String::from))
-                        .collect();
-                    if !ids.is_empty() {
-                        return Some(ids);
-                    }
-                }
-                // Fallback: try parsing as direct array
-                if let Some(arr) = v.as_array() {
-                    let ids: Vec<String> = arr
-                        .iter()
-                        .filter_map(|e| e.get("id").and_then(Value::as_str).map(String::from))
-                        .collect();
-                    if !ids.is_empty() {
-                        return Some(ids);
-                    }
-                }
-                None
-            })
-            .unwrap_or_default();
-
         agent_types.push(json!({
             "type": key,
-            "models": models,
+            "models": models_from_agent_metadata_row(row),
         }));
     }
 
     json!({ "agent_types": agent_types })
+}
+
+fn models_from_agent_metadata_row(row: &aionui_db::models::AgentMetadataRow) -> Vec<String> {
+    row.available_models
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| {
+            // Try object with "available_models" key first (ModelInfoPayload format)
+            if let Some(arr) = v.get("available_models").and_then(Value::as_array) {
+                let ids: Vec<String> = arr
+                    .iter()
+                    .filter_map(|e| e.get("id").and_then(Value::as_str).map(String::from))
+                    .collect();
+                if !ids.is_empty() {
+                    return Some(ids);
+                }
+            }
+            // Fallback: try parsing as direct array
+            if let Some(arr) = v.as_array() {
+                let ids: Vec<String> = arr
+                    .iter()
+                    .filter_map(|e| e.get("id").and_then(Value::as_str).map(String::from))
+                    .collect();
+                if !ids.is_empty() {
+                    return Some(ids);
+                }
+            }
+            None
+        })
+        .unwrap_or_default()
 }
 
 /// Phase-1 minimal `team_describe_assistant` handler. Backend has no preset
@@ -687,8 +698,9 @@ mod tests {
                 .starts_with("Query available models for team agent types.")
         );
         assert!(
-            desc.description
-                .contains("Pass agent_type to query a specific backend, or omit it to see all.")
+            desc.description.contains(
+                "Pass agent_type or custom_agent_id to query a specific catalog entry, or omit it to see all."
+            )
         );
     }
 
@@ -800,6 +812,31 @@ mod tests {
             .collect();
         // gemini has no available_models in DB → should still appear but with empty models
         assert!(types.contains(&"gemini"));
+    }
+
+    #[test]
+    fn build_list_models_from_rows_exposes_custom_acp_agents_by_custom_agent_id() {
+        let mut row = make_agent_row(
+            "codex-ollama",
+            true,
+            r#"{"current_model_id":"qwen3-coder:30b-ctx64k","available_models":[{"id":"qwen3-coder:30b-ctx64k","label":"Qwen"}]}"#,
+        );
+        row.id = "kodo-codex-ollama".into();
+        row.name = "Kodo CLI".into();
+        row.agent_source = "extension".into();
+        row.behavior_policy = Some(r#"{"supports_team":true}"#.into());
+
+        let value = build_list_models_from_rows(&[row], Some("acp"), &[]);
+        let entry = value["agent_types"]
+            .as_array()
+            .unwrap()
+            .first()
+            .expect("custom ACP entry");
+        assert_eq!(entry["type"].as_str(), Some("acp"));
+        assert_eq!(entry["name"].as_str(), Some("Kodo CLI"));
+        assert_eq!(entry["custom_agent_id"].as_str(), Some("kodo-codex-ollama"));
+        assert_eq!(entry["backend"].as_str(), Some("codex-ollama"));
+        assert_eq!(entry["models"][0].as_str(), Some("qwen3-coder:30b-ctx64k"));
     }
 
     fn make_agent_row(backend: &str, enabled: bool, available_models: &str) -> AgentMetadataRow {

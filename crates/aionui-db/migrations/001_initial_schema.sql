@@ -263,7 +263,7 @@ VALUES
 
     ('53861a53', '/api/assets/logos/tools/coding/opencode-light.svg', 'OpenCode',
      'opencode', 'acp', 'builtin', '{"binary_name":"opencode"}',
-     1, 'opencode', '["acp"]', '[]',
+     0, 'opencode', '["acp"]', '[]',
      '[".opencode/skills"]',
      '{"supports_side_question":false}',
      'build', 3130,

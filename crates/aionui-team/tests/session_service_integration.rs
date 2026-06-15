@@ -1669,6 +1669,56 @@ async fn provisioning_writes_typed_team_binding_for_create_and_add_agent() {
 }
 
 #[tokio::test]
+async fn provisioning_writes_agent_id_for_custom_acp_team_agent() {
+    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(StubAgentMetadataRepo::empty());
+    let (svc, _, conv_repo) =
+        setup_with_factory_and_metadata_and_conversation_repo(success_factory(), agent_metadata_repo);
+    let created = svc
+        .create_team(
+            "user1",
+            CreateTeamRequest {
+                name: "Custom ACP".into(),
+                agents: vec![TeamAgentInput {
+                    name: "Lead".into(),
+                    role: "lead".into(),
+                    backend: "acp".into(),
+                    model: "claude".into(),
+                    custom_agent_id: None,
+                    conversation_id: None,
+                }],
+                workspace: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let added = svc
+        .add_agent(
+            "user1",
+            &created.id,
+            AddAgentRequest {
+                name: "Kodo Lane".into(),
+                role: "teammate".into(),
+                backend: "acp".into(),
+                model: "qwen3-coder:30b-ctx64k".into(),
+                custom_agent_id: Some("kodo-codex-ollama".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let extra = conv_repo.get_extra(&added.conversation_id).unwrap();
+    assert_eq!(
+        extra.get("agent_id").and_then(|v| v.as_str()),
+        Some("kodo-codex-ollama")
+    );
+    assert_eq!(
+        extra.get("custom_agent_id").and_then(|v| v.as_str()),
+        Some("kodo-codex-ollama")
+    );
+}
+
+#[tokio::test]
 async fn aa4_add_agent_to_nonexistent_team() {
     let svc = setup();
     let result = svc
